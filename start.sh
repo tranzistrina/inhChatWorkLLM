@@ -9,6 +9,11 @@ if [ ! -f .vendor/FreeDeepseekAPI/package.json ]; then
   exit 1
 fi
 
+if [ ! -f users.json ]; then
+  echo 'users.json не найден. Выполните ./setup.sh'
+  exit 1
+fi
+
 cleanup(){
   [ -n "${DS_PID:-}" ] && kill "$DS_PID" 2>/dev/null || true
   [ -n "${FLASK_PID:-}" ] && kill "$FLASK_PID" 2>/dev/null || true
@@ -25,5 +30,5 @@ fi
 
 sleep 2
 python app.py & FLASK_PID=$!
-echo 'inhCHAT: http://127.0.0.1:698'
+echo 'inhCHAT: http://127.0.0.1:6767'
 wait "$FLASK_PID"
