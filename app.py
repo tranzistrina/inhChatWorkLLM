@@ -63,7 +63,7 @@ def sync_users():
     users = load_users_file()
     with db() as c:
         for u in users:
-            row = c.execute('SELECT id,password_hash FROM users WHERE email=?', (u['username'],)).fetchone()
+            row = c.execute('SELECT id FROM users WHERE email=?', (u['username'],)).fetchone()
             ph = generate_password_hash(u['password'])
             if row: c.execute('UPDATE users SET password_hash=? WHERE id=?', (ph, row['id']))
             else: c.execute('INSERT INTO users(email,password_hash) VALUES(?,?)', (u['username'], ph))
@@ -76,13 +76,23 @@ def login_required(fn):
     @wraps(fn)
     def w(*a, **kw):
         if 'user_id' not in session: return jsonify({'error':'auth_required'}), 401
+        try:
+            active = {u['username'] for u in load_users_file()}
+            with db() as c: u = c.execute('SELECT email FROM users WHERE id=?',(session['user_id'],)).fetchone()
+            if not u or u['email'] not in active:
+                session.clear(); return jsonify({'error':'auth_required'}), 401
+        except RuntimeError as e:
+            return jsonify({'error':str(e)}), 500
         return fn(*a, **kw)
     return w
 
 
 def current_user():
     if 'user_id' not in session: return None
-    with db() as c: return c.execute('SELECT id,email FROM users WHERE id=?',(session['user_id'],)).fetchone()
+    try: active = {u['username'] for u in load_users_file()}
+    except RuntimeError: return None
+    with db() as c: u = c.execute('SELECT id,email FROM users WHERE id=?',(session['user_id'],)).fetchone()
+    return u if u and u['email'] in active else None
 
 
 def provider_row(pid):
@@ -151,9 +161,10 @@ def me():
 
 @app.post('/api/auth/login')
 def login():
-    try: sync_users()
+    try: users = sync_users()
     except RuntimeError as e: return jsonify({'error':str(e)}), 500
     d=request.json or {}; username=d.get('username','').strip().lower()
+    if not any(u['username'] == username for u in users): return jsonify({'error':'Неверный логин или пароль'}),401
     with db() as c: u=c.execute('SELECT * FROM users WHERE email=?',(username,)).fetchone()
     if not u or not check_password_hash(u['password_hash'],d.get('password','')): return jsonify({'error':'Неверный логин или пароль'}),401
     session['user_id']=u['id']; return jsonify({'ok':True,'user':{'id':u['id'],'username':u['email']}})
