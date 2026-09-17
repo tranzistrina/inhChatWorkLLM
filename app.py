@@ -1,4 +1,4 @@
-import os, json, uuid, math, subprocess, threading
+import os, json, uuid, math, subprocess
 from pathlib import Path
 from functools import wraps
 from flask import Flask, request, jsonify, session, send_from_directory
@@ -11,7 +11,8 @@ ROOT = Path(__file__).resolve().parent
 DATA = ROOT / 'data'; DATA.mkdir(exist_ok=True)
 WORKSPACE = ROOT / 'workspace'; WORKSPACE.mkdir(exist_ok=True)
 DB = DATA / 'inhchat.db'
-PORT = int(os.getenv('PORT', '698'))
+USERS_FILE = ROOT / 'users.json'
+PORT = int(os.getenv('PORT', '6767'))
 APP_SECRET = os.getenv('APP_SECRET_KEY', 'change-me-in-.env')
 DEEPSEEK_URL = os.getenv('DEEPSEEK_BASE_URL', 'http://127.0.0.1:9655/v1')
 
@@ -29,6 +30,46 @@ with db() as c:
     CREATE TABLE IF NOT EXISTS providers(id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, name TEXT NOT NULL, base_url TEXT NOT NULL, api_key TEXT DEFAULT '', model TEXT NOT NULL, kind TEXT DEFAULT 'openai', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(user_id,name));
     CREATE TABLE IF NOT EXISTS chats(id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, title TEXT NOT NULL, messages TEXT NOT NULL, provider_id INTEGER, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);
     ''')
+
+
+def ensure_users_file():
+    if not USERS_FILE.exists():
+        USERS_FILE.write_text(json.dumps([{'username': 'admin', 'password': '676769'}], ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+        try: USERS_FILE.chmod(0o600)
+        except OSError: pass
+
+
+def load_users_file():
+    ensure_users_file()
+    try:
+        data = json.loads(USERS_FILE.read_text(encoding='utf-8'))
+        if not isinstance(data, list): raise ValueError('users.json должен содержать JSON-массив')
+    except Exception as e:
+        raise RuntimeError(f'Ошибка users.json: {e}')
+    users = []
+    seen = set()
+    for item in data:
+        if not isinstance(item, dict): continue
+        username = str(item.get('username', '')).strip().lower()
+        password = str(item.get('password', ''))
+        if username and password and username not in seen:
+            users.append({'username': username, 'password': password, 'name': str(item.get('name', username))})
+            seen.add(username)
+    if not users: raise RuntimeError('В users.json нет ни одного корректного пользователя')
+    return users
+
+
+def sync_users():
+    users = load_users_file()
+    with db() as c:
+        for u in users:
+            row = c.execute('SELECT id,password_hash FROM users WHERE email=?', (u['username'],)).fetchone()
+            ph = generate_password_hash(u['password'])
+            if row: c.execute('UPDATE users SET password_hash=? WHERE id=?', (ph, row['id']))
+            else: c.execute('INSERT INTO users(email,password_hash) VALUES(?,?)', (u['username'], ph))
+    return users
+
+sync_users()
 
 
 def login_required(fn):
@@ -108,21 +149,14 @@ def index(): return send_from_directory('static','index.html')
 def me():
     u=current_user(); return jsonify({'user':dict(u) if u else None})
 
-@app.post('/api/auth/register')
-def register():
-    d=request.json or {}; email=d.get('email','').strip().lower(); pw=d.get('password','')
-    if len(email)<3 or len(pw)<8: return jsonify({'error':'Нужен корректный email и пароль минимум 8 символов'}),400
-    try:
-        with db() as c: cur=c.execute('INSERT INTO users(email,password_hash) VALUES(?,?)',(email,generate_password_hash(pw))); uid=cur.lastrowid
-    except sqlite3.IntegrityError: return jsonify({'error':'Аккаунт уже существует'}),409
-    session['user_id']=uid; return jsonify({'ok':True,'user':{'id':uid,'email':email}})
-
 @app.post('/api/auth/login')
 def login():
-    d=request.json or {}
-    with db() as c: u=c.execute('SELECT * FROM users WHERE email=?',(d.get('email','').strip().lower(),)).fetchone()
-    if not u or not check_password_hash(u['password_hash'],d.get('password','')): return jsonify({'error':'Неверный email или пароль'}),401
-    session['user_id']=u['id']; return jsonify({'ok':True,'user':{'id':u['id'],'email':u['email']}})
+    try: sync_users()
+    except RuntimeError as e: return jsonify({'error':str(e)}), 500
+    d=request.json or {}; username=d.get('username','').strip().lower()
+    with db() as c: u=c.execute('SELECT * FROM users WHERE email=?',(username,)).fetchone()
+    if not u or not check_password_hash(u['password_hash'],d.get('password','')): return jsonify({'error':'Неверный логин или пароль'}),401
+    session['user_id']=u['id']; return jsonify({'ok':True,'user':{'id':u['id'],'username':u['email']}})
 
 @app.post('/api/auth/logout')
 def logout(): session.clear(); return jsonify({'ok':True})
