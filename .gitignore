@@ -4,6 +4,7 @@ data/*.db
 data/*.log
 workspace/*
 .vendor/FreeDeepseekAPI/
+users.json
 .DS_Store
 __pycache__/
 *.pyc
