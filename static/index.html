@@ -2,7 +2,7 @@
 <html lang="ru">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>inhCHAT</title><link rel="stylesheet" href="/static/style.css"></head>
 <body>
-<div id="auth" class="auth hidden"><div class="auth-card"><div class="brand big">inh<span>CHAT</span></div><p>Локальный LLM-клиент с обычным чатом и автономным Work Mode.</p><div class="tabs"><button data-auth="login" class="active">Войти</button><button data-auth="register">Создать аккаунт</button></div><input id="email" type="email" placeholder="Email"><input id="password" type="password" placeholder="Пароль"><button id="authSubmit" class="primary">Войти</button><div id="authError" class="error"></div></div></div>
+<div id="auth" class="auth hidden"><div class="auth-card"><div class="brand big">inh<span>CHAT</span></div><p>Локальный LLM-клиент с обычным чатом и автономным Work Mode.</p><input id="username" type="text" autocomplete="username" placeholder="Логин"><input id="password" type="password" autocomplete="current-password" placeholder="Пароль"><button id="authSubmit" class="primary">Войти</button><div id="authError" class="error"></div></div></div>
 <div id="app" class="layout hidden">
 <aside class="sidebar"><div class="brand">inh<span>CHAT</span></div><button id="newChat" class="new">＋ Новый чат</button><div id="chatList" class="chat-list"></div><div class="side-bottom"><button id="settingsBtn">⚙ Настройки</button><button id="logout">Выйти</button></div></aside>
 <main class="main"><header><div><b id="chatTitle">Новый чат</b><small id="status">готов</small></div><div class="header-actions"><button id="modeBtn" class="mode">◉ Режим работы</button><button id="settingsTop">⚙</button></div></header>
