@@ -20,16 +20,34 @@ if [ ! -f .env ]; then
   APP_SECRET_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
   cat > .env <<EOF
 APP_SECRET_KEY=$APP_SECRET_KEY
-PORT=698
+PORT=6767
 DEEPSEEK_BASE_URL=http://127.0.0.1:9655/v1
 EOF
+else
+  if grep -q '^PORT=' .env; then sed -i.bak 's/^PORT=.*/PORT=6767/' .env && rm -f .env.bak; else printf '\nPORT=6767\n' >> .env; fi
 fi
+
+if [ ! -f users.json ]; then
+  cat > users.json <<'EOF'
+[
+  {
+    "username": "admin",
+    "password": "676769"
+  }
+]
+EOF
+fi
+
 mkdir -p data workspace
 chmod 700 data workspace
+chmod 600 users.json .env
 chmod +x setup.sh start.sh
 
 echo ''
-echo 'inhCHAT установлен.'
+echo 'inhCHAT установлен/обновлён.'
+echo 'Логин: admin'
+echo 'Пароль: 676769'
+echo 'Пользователей редактируйте только в users.json.'
 echo '1) source .venv/bin/activate'
 echo '2) ./start.sh'
-echo '3) открой http://127.0.0.1:698'
+echo '3) открой http://127.0.0.1:6767'
