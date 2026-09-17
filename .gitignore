@@ -1,0 +1,9 @@
+.venv/
+.env
+data/*.db
+data/*.log
+workspace/*
+.vendor/FreeDeepseekAPI/
+.DS_Store
+__pycache__/
+*.pyc
