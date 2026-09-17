@@ -14,23 +14,19 @@ mkdir -p .vendor
 if [ ! -d .vendor/FreeDeepseekAPI/.git ]; then
   git clone https://github.com/ForgetMeAI/FreeDeepseekAPI.git .vendor/FreeDeepseekAPI
 fi
-cd .vendor/FreeDeepseekAPI
-npm install
-cd ../..
+(cd .vendor/FreeDeepseekAPI && npm install)
 
 if [ ! -f .env ]; then
-  python3 - <<'PY'
-import secrets
-print('APP_SECRET_KEY='+secrets.token_urlsafe(48))
-PY
-  > .env
-  cat >> .env <<'EOF'
+  APP_SECRET_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+  cat > .env <<EOF
+APP_SECRET_KEY=$APP_SECRET_KEY
 PORT=698
 DEEPSEEK_BASE_URL=http://127.0.0.1:9655/v1
 EOF
 fi
 mkdir -p data workspace
 chmod 700 data workspace
+chmod +x setup.sh start.sh
 
 echo ''
 echo 'inhCHAT установлен.'
