@@ -64,7 +64,8 @@ def sync_users():
     with db() as c:
         for u in users:
             row = c.execute('SELECT id FROM users WHERE email=?', (u['username'],)).fetchone()
-            ph = generate_password_hash(u['password'])
+            # Explicit PBKDF2 keeps compatibility with macOS Python builds that lack hashlib.scrypt.
+            ph = generate_password_hash(u['password'], method='pbkdf2:sha256:600000')
             if row: c.execute('UPDATE users SET password_hash=? WHERE id=?', (ph, row['id']))
             else: c.execute('INSERT INTO users(email,password_hash) VALUES(?,?)', (u['username'], ph))
     return users
@@ -89,10 +90,7 @@ def login_required(fn):
 
 def current_user():
     if 'user_id' not in session: return None
-    try: active = {u['username'] for u in load_users_file()}
-    except RuntimeError: return None
-    with db() as c: u = c.execute('SELECT id,email FROM users WHERE id=?',(session['user_id'],)).fetchone()
-    return u if u and u['email'] in active else None
+    with db() as c: return c.execute('SELECT id,email FROM users WHERE id=?',(session['user_id'],)).fetchone()
 
 
 def provider_row(pid):
@@ -159,14 +157,23 @@ def index(): return send_from_directory('static','index.html')
 def me():
     u=current_user(); return jsonify({'user':dict(u) if u else None})
 
+@app.post('/api/auth/register')
+def register():
+    return jsonify({'error':'Регистрация отключена. Добавляйте пользователей через users.json на сервере.'}), 403
+
 @app.post('/api/auth/login')
 def login():
-    try: users = sync_users()
+    d=request.json or {}
+    try: configured = {u['username']:u for u in load_users_file()}
     except RuntimeError as e: return jsonify({'error':str(e)}), 500
-    d=request.json or {}; username=d.get('username','').strip().lower()
-    if not any(u['username'] == username for u in users): return jsonify({'error':'Неверный логин или пароль'}),401
+    username=d.get('username',d.get('email','')).strip().lower(); pw=d.get('password','')
+    uconf=configured.get(username)
+    if not uconf: return jsonify({'error':'Неверный логин или пароль'}),401
     with db() as c: u=c.execute('SELECT * FROM users WHERE email=?',(username,)).fetchone()
-    if not u or not check_password_hash(u['password_hash'],d.get('password','')): return jsonify({'error':'Неверный логин или пароль'}),401
+    if not u:
+        sync_users()
+        with db() as c: u=c.execute('SELECT * FROM users WHERE email=?',(username,)).fetchone()
+    if not u or not check_password_hash(u['password_hash'],pw): return jsonify({'error':'Неверный логин или пароль'}),401
     session['user_id']=u['id']; return jsonify({'ok':True,'user':{'id':u['id'],'username':u['email']}})
 
 @app.post('/api/auth/logout')
