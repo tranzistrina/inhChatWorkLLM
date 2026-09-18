@@ -100,9 +100,25 @@ def build_pdf(d,out):
     def footer(c,doc): c.saveState(); c.setFont(fontname,14); c.drawCentredString(A4[0]/2,1*cm,str(doc.page) if doc.page>1 else ''); c.restoreState()
     doc.build(story,onFirstPage=footer,onLaterPages=footer)
 
+def build_screenshot_description(raw):
+    d=parse_spec(raw)
+    lines=['ПОДРОБНОЕ ОПИСАНИЕ КАЖДОГО СКРИНШОТА','',f"Лабораторная работа № {d.get('lab_number','')}",f"Тема: {d.get('topic','')}",'']
+    n=0
+    for sec in d.get('sections',[]):
+        for fig in sec.get('figures',[]) or []:
+            n += 1
+            lines += [f'СКРИНШОТ {n}',
+                      f"Где вставить: {fig.get('caption','')}",
+                      f"Ссылка в тексте: {fig.get('reference','')}",
+                      f"Что должно быть на скриншоте: {fig.get('screenshot_description') or fig.get('caption') or 'Показать результат выполнения соответствующего шага.'}",
+                      'Перед вставкой проверить, что на изображении виден именно требуемый результат и отсутствуют посторонние данные.','']
+    if n == 0:
+        lines += ['В отчете не обнаружено требований к отдельным скриншотам.']
+    return '\n'.join(lines)
+
 def build_report_files(raw,out_dir,base='Отчет'):
     d=parse_spec(raw); root=Path(out_dir); root.mkdir(parents=True,exist_ok=True); safe=re.sub(r'[^A-Za-zА-Яа-я0-9._-]+','_',base).strip('_') or 'Отчет'
-    a=root/(safe+'.docx'); b=root/(safe+'.pdf'); build_docx(d,a); build_pdf(d,b); return [a,b]
+    a=root/(safe+'.docx'); b=root/(safe+'.pdf'); build_docx(d,a); build_pdf(d,b); c=root/(safe+'_описание_скриншотов.txt'); c.write_text(build_screenshot_description(raw),encoding='utf-8'); return [a,b,c]
 
 def strict_system_prompt():
     return json.dumps({'rules':STRICT_RULES,'schema':{'title':'ОТЧЕТ','discipline':'string','lab_number':'string','topic':'string','student':'string','group':'string','city':'string','year':'string','sections':[{'heading':'string','paragraphs':['string'],'steps':['string'],'tables':[[['cell']]],'figures':[{'reference':'string','caption':'string'}],'answers':['string']}]},'constraints':['Return ONLY valid JSON.','Use only supplied sources and user conditions.','Never invent measurements or screenshots.','For unavailable screenshots create a placeholder and caption.','Preserve source order and terminology.']},ensure_ascii=False)
