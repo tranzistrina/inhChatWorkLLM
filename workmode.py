@@ -1,7 +1,7 @@
 import json, re, shutil, zipfile
 from pathlib import Path
 
-TEXT_EXT={'.txt','.md','.markdown','.rst','.py','.js','.ts','.tsx','.jsx','.json','.yaml','.yml','.toml','.ini','.cfg','.conf','.env','.log','.csv','.tsv','.html','.htm','.css','.scss','.xml','.sql','.sh','.bash','.zsh','.bat','.ps1','.java','.kt','.kts','.c','.h','.cpp','.hpp','.cs','.go','.rs','.rb','.php','.swift','.vue','.svelte','.tex'}
+TEXT_EXT={'.docx','.pdf','.txt','.md','.markdown','.rst','.py','.js','.ts','.tsx','.jsx','.json','.yaml','.yml','.toml','.ini','.cfg','.conf','.env','.log','.csv','.tsv','.html','.htm','.css','.scss','.xml','.sql','.sh','.bash','.zsh','.bat','.ps1','.java','.kt','.kts','.c','.h','.cpp','.hpp','.cs','.go','.rs','.rb','.php','.swift','.vue','.svelte','.tex'}
 MAX_UPLOAD=24*1024*1024
 MAX_FILES=200
 MAX_FILE_TEXT=150000
@@ -82,3 +82,13 @@ def parse_archive_requests(text):
         files=[x.strip() for x in re.split(r'[,;]',m.group(2)) if x.strip()]
         requests.append((m.group(1).strip(),files))
     return requests
+
+
+def document_text(path):
+    suffix=Path(path).suffix.lower()
+    if suffix not in {'.docx','.pdf'}: return None
+    try:
+        from report_builder import extract_document_text
+        return extract_document_text(path)
+    except Exception:
+        return None
