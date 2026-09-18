@@ -24,3 +24,40 @@ body.dark .message-avatar{background:#303030;color:#ddd}body.dark .message.user 
 body.dark .file-card{background:#292929;border-color:#414141;color:#eee}body.dark .file-card:hover{background:#333}body.dark .file-icon{background:#3a3a3a}body.dark .composer-shell{background:linear-gradient(transparent,#212121 30%)}body.dark .composer,body.dark .composer-shell form{background:#2b2b2b;border-color:#4a4a4a;box-shadow:0 8px 35px #0007}body.dark .composer textarea,body.dark .composer-shell textarea{color:#eee}body.dark .send{background:#eee;color:#171717}body.dark .attach{color:#bbb}body.dark .attachment{background:#2d2d2d;border-color:#444;color:#ddd}
 body.dark .work-panel{background:#191919f2;border-color:#444}body.dark .work-head{border-color:#333}body.dark .task{border-color:#2d2d2d}body.dark .task-dot{border-color:#4a4a4a}body.dark .task.running .task-dot{background:#eee;color:#111}body.dark .task.done .task-dot{background:#777;color:#111;border-color:#777}body.dark .task small,body.dark .task-result{color:#858585}body.dark .work-events{border-color:#333}body.dark .collapse-btn{background:#292929;border-color:#444;color:#bbb}
 body.dark .modal-card{background:#202020;border-color:#444}body.dark .settings-block,body.dark .provider-row{border-color:#333}body.dark .provider-row span{color:#777}body.dark .ghost,body.dark .icon-btn{background:#2a2a2a;color:#ccc;border-color:#444}body.dark .primary{background:#eee;color:#171717}body.dark #providerForm input,body.dark .auth-card input{background:#171717;border-color:#414141;color:#eee}body.dark .workspace-files a{color:#bbb;border-color:#2f2f2f}body.dark .workspace-files a:hover{color:#fff;background:#292929}body.dark .chat-menu{background:#242424;border-color:#444}body.dark .chat-menu button{color:#ddd}body.dark .chat-menu button:hover{background:#333}body.dark .auto-model-box{background:#292929;border-color:#444;color:#aaa}
+
+/* Polished motion */
+@keyframes uiFadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+@keyframes uiFadeIn{from{opacity:0}to{opacity:1}}
+@keyframes uiPop{0%{opacity:0;transform:scale(.96)}70%{transform:scale(1.01)}100%{opacity:1;transform:scale(1)}}
+@keyframes uiFloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-3px)}}
+@keyframes uiGlow{0%,100%{box-shadow:0 8px 35px #0001}50%{box-shadow:0 10px 42px #0002}}
+.layout{animation:uiFadeIn .35s ease both}
+.sidebar{animation:uiFadeUp .4s cubic-bezier(.2,.8,.2,1) both}
+header{animation:uiFadeUp .38s .04s cubic-bezier(.2,.8,.2,1) both}
+.welcome{animation:uiPop .55s cubic-bezier(.2,.8,.2,1) both}
+.welcome-mark{animation:uiFloat 3.2s ease-in-out .7s infinite}
+.quick-grid button{transition:transform .18s ease,box-shadow .18s ease,background-color .18s ease,border-color .18s ease}
+.quick-grid button:hover{transform:translateY(-2px);box-shadow:0 8px 24px #0002}
+.chat-row{animation:uiFadeUp .25s ease both}
+.chat-item,.chat-more,.ghost,.icon-btn,.mode,.round,.new-chat,.attach,.send,.collapse-btn{transition:transform .16s ease,background-color .16s ease,color .16s ease,border-color .16s ease,box-shadow .16s ease}
+.chat-item:active,.mode:active,.round:active,.new-chat:active,.attach:active,.send:active,.ghost:active,.icon-btn:active,.collapse-btn:active{transform:scale(.97)}
+.message{animation:uiFadeUp .32s cubic-bezier(.2,.8,.2,1) both}
+.message-avatar{transition:transform .2s ease,box-shadow .2s ease}
+.message:hover .message-avatar{transform:translateY(-1px);box-shadow:0 5px 16px #0002}
+.file-card{transition:transform .18s ease,box-shadow .18s ease,background-color .18s ease}
+.file-card:hover{transform:translateY(-1px);box-shadow:0 7px 20px #0002}
+.composer,.composer-shell form{transition:border-color .2s ease,box-shadow .2s ease,transform .2s ease}
+.composer:focus-within,.composer-shell form:focus-within{border-color:#aaa;box-shadow:0 10px 40px #0002;transform:translateY(-1px)}
+.send:hover{transform:translateY(-1px) scale(1.03);box-shadow:0 5px 16px #0002}
+.attach:hover{transform:rotate(8deg)}
+.work-panel{animation:uiPop .3s cubic-bezier(.2,.8,.2,1) both}
+.task{animation:uiFadeUp .25s ease both}
+.task-dot{transition:transform .25s ease,background-color .25s ease,border-color .25s ease}
+.task.done .task-dot{animation:uiPop .3s ease both}
+.work-event{animation:uiFadeIn .22s ease both}
+.modal{animation:uiFadeIn .2s ease both}
+.modal-card{animation:uiPop .3s cubic-bezier(.2,.8,.2,1) both}
+.provider-row{animation:uiFadeUp .24s ease both}
+.attachment{animation:uiPop .22s ease both}
+.spinner{filter:drop-shadow(0 0 4px #8888)}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important;scroll-behavior:auto!important}}
