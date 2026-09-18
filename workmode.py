@@ -56,7 +56,7 @@ def parse_plan(text, max_tasks=12):
     if m:
         try:
             arr=json.loads(m.group(0))
-            if isinstance(arr,list): return [{'title':str(x.get('title',x.get('task','Задача'))),'description':str(x.get('description','')),'status':'pending'} for x in arr if isinstance(x,dict)][:max(1,min(int(max_tasks or 12),30))
+            if isinstance(arr,list): return [{'title':str(x.get('title',x.get('task','Задача'))),'description':str(x.get('description','')),'status':'pending'} for x in arr if isinstance(x,dict)][:max(1,min(int(max_tasks or 12),30))]
         except Exception: pass
     return [{'title':line.strip(),'description':'Выполнить задачу и зафиксировать результат','status':'pending'} for line in (text or '').splitlines() if line.strip()][:max(1,min(int(max_tasks or 12),30))] or [{'title':'Выполнить запрос пользователя','description':'Подготовить результат','status':'pending'}]
 
