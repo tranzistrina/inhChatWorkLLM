@@ -1,8 +1,9 @@
-import json, re, shutil, uuid, zipfile, subprocess
+import json, re, shutil, uuid, zipfile, subprocess, urllib.parse
 from pathlib import Path
 from flask import request, jsonify, send_file, session
 from server import app, db, auth, provider, llm, WORK, DEEPSEEK
 from workmode import ingest_uploads, source_context, parse_plan, create_archive
+from server import LIBRARY
 
 CHAT_ROOT = WORK / 'chats'; CHAT_ROOT.mkdir(parents=True, exist_ok=True)
 TEXT_EXT={'.txt','.md','.markdown','.rst','.py','.js','.ts','.tsx','.jsx','.json','.yaml','.yml','.toml','.ini','.cfg','.conf','.env','.log','.csv','.tsv','.html','.htm','.css','.scss','.xml','.sql','.sh','.bash','.zsh','.bat','.ps1','.java','.kt','.kts','.c','.h','.cpp','.hpp','.cs','.go','.rs','.rb','.php','.swift','.vue','.svelte','.tex'}
@@ -11,6 +12,17 @@ with db() as c:
     cols={r['name'] for r in c.execute('PRAGMA table_info(work_runs)').fetchall()}
     if 'iteration' not in cols: c.execute('ALTER TABLE work_runs ADD COLUMN iteration INTEGER DEFAULT 1')
     c.execute('''CREATE TABLE IF NOT EXISTS work_events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL,chat_id TEXT NOT NULL,user_id INTEGER NOT NULL,kind TEXT NOT NULL,message TEXT NOT NULL,data TEXT DEFAULT '{}',created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+def shared_library_context():
+    root=(LIBRARY/str(session['uid'])).resolve();root.mkdir(parents=True,exist_ok=True);out=[]
+    for p in root.rglob('*'):
+        if p.is_file() and p.suffix.lower() in TEXT_EXT:
+            try:out.append({'path':'library/'+str(p.relative_to(root)),'text':p.read_text(encoding='utf-8',errors='replace')[:120000]})
+            except OSError:pass
+    return source_context(out)[:800000] if out else '(Общая библиотека пуста)'
+
+def urlparse_path(url):
+    u=urllib.parse.urlparse(url);parts=[x for x in u.path.strip('/').split('/') if x];return parts[1] if len(parts)>1 else 'github_repo'
 
 def chat_root(cid):
     p=(CHAT_ROOT/str(cid)).resolve()
@@ -84,6 +96,16 @@ def materialize_task(cid,iteration,raw):
     for m in re.finditer(r'FILE:\s*([^\n]+)\n([\s\S]*?)(?=\nFILE:|\nCOPY_FROM:|\nARCHIVE:|\Z)',raw or '',re.I):
         try:p=safe_file(current,m.group(1).strip());p.parent.mkdir(parents=True,exist_ok=True);p.write_text(m.group(2),encoding='utf-8');made.append(str(p.relative_to(root)))
         except ValueError:continue
+    for m in re.finditer(r'GITHUB:\s*(https?://github\.com/[^\s]+?)(?:\s*=>\s*([^\n]+))?\n',raw or '',re.I):
+        url=m.group(1).rstrip('/').rstrip('.');dst=(m.group(2) or urlparse_path(url)).strip()
+        try:
+            u=urllib.parse.urlparse(url);parts=[x for x in u.path.strip('/').split('/') if x]
+            if u.netloc.lower()!='github.com' or len(parts)<2:continue
+            repo_url='https://github.com/'+parts[0]+'/'+parts[1].removesuffix('.git')
+            target=safe_file(current,dst);target.mkdir(parents=True,exist_ok=True)
+            subprocess.run(['git','clone','--depth','1',repo_url,str(target)],check=True,timeout=180,capture_output=True,text=True)
+            made.append(str(target.relative_to(root)))
+        except (ValueError,OSError,subprocess.SubprocessError):continue
     copies,_,archives=parse_directives(raw)
     for src_rel,dst_rel in copies:
         try:
@@ -133,7 +155,7 @@ def plan(cid):
     if not p or not r:return jsonify(error='Рабочая сессия или провайдер не найдены'),400
     src=json.loads(r['source_files']);emit(r['id'],cid,'plan_start','Составляю план задач')
     try:
-        raw=llm(p,[{'role':'system','content':'Planning stage. Return ONLY a JSON array with 1-12 sequential tasks. Each object has title and description. Do not execute anything.'},{'role':'user','content':r['request']+'\n\nFILES:\n'+context_for_task(cid,r['iteration'],src)}]);tasks=parse_plan(raw)
+        raw=llm(p,[{'role':'system','content':'Planning stage. Return ONLY a JSON array with 1-12 sequential tasks. Each object has title and description. Do not execute anything.'},{'role':'user','content':r['request']+'\n\nSHARED LIBRARY:\n'+shared_library_context()+'\n\nFILES:\n'+context_for_task(cid,r['iteration'],src)}]);tasks=parse_plan(raw)
         with db() as c:c.execute('UPDATE work_runs SET plan=?,results=? WHERE id=?',(json.dumps(tasks,ensure_ascii=False),'[]',r['id']))
         emit(r['id'],cid,'plan_done',f'План готов: {len(tasks)} задач',{'count':len(tasks)});return jsonify(tasks=tasks,plan_text=raw)
     except Exception as e:emit(r['id'],cid,'error',str(e));return jsonify(error=str(e)),500
@@ -150,6 +172,7 @@ def task(cid):
 Create text artifacts with FILE:path followed by full content. Paths after FILE are relative to the CURRENT iteration.
 Copy with COPY_FROM: iterations/N/path => destination/path.
 Create a ZIP with ARCHIVE: name.zip followed by FILES: path1, path2. FILES may reference any iteration in this chat.
+Clone a public GitHub repository with GITHUB: https://github.com/owner/repo => repo_name. Only github.com public repository URLs are allowed.
 Do not perform other tasks.'''.strip()},{'role':'user','content':f'Original request:\n{r["request"]}\n\nAssigned task:\n{json.dumps(tasks[idx],ensure_ascii=False)}\n\nAVAILABLE FILES:\n{available}\n\nSOURCE TEXT:\n{context_for_task(cid,r["iteration"],src)}\n\nPREVIOUS TASK RESULTS:\n{previous}'}]
     emit(r['id'],cid,'task_start',f'Выполняю задачу {idx+1} из {len(tasks)}',{'index':idx})
     try:raw=llm(p,prompt);made=materialize_task(cid,r['iteration'],raw)
@@ -165,7 +188,7 @@ def final(cid):
     if not p or not r:return jsonify(error='Рабочая сессия или провайдер не найдены'),400
     results=json.loads(r['results']);src=json.loads(r['source_files']);work='\n\n'.join(f'TASK {x["index"]+1}:\n{x["result"]}' for x in results);available='\n'.join('- '+x['path'] for x in all_chat_files(cid,r['iteration']))
     emit(r['id'],cid,'final_start','Готовлю итоговый ответ и выбираю вложения')
-    prompt=[{'role':'system','content':'Final synthesis stage. Prepare the final answer from completed task results. Do not invent work. Decide which files, if any, should be attached. Insert a file anywhere in the response with [[ATTACH: path]]. A selected file may be from any previous iteration of this same chat. The marker is rendered as a downloadable file card exactly at that position. Attach only files materially useful to the user. Do not attach every created file automatically.'},{'role':'user','content':r['request']+'\n\nAVAILABLE FILES:\n'+available+'\n\nSOURCE FILES:\n'+context_for_task(cid,r['iteration'],src)+'\n\nCOMPLETED TASKS:\n'+work}]
+    prompt=[{'role':'system','content':'Final synthesis stage. Prepare the final answer from completed task results. Do not invent work. Decide which files, if any, should be attached. Insert a file anywhere in the response with [[ATTACH: path]]. A selected file may be from any previous iteration of this same chat. The marker is rendered as a downloadable file card exactly at that position. Attach only files materially useful to the user. Do not attach every created file automatically.'},{'role':'user','content':r['request']+'\n\nSHARED LIBRARY:\n'+shared_library_context()+'\n\nAVAILABLE FILES:\n'+available+'\n\nSOURCE FILES:\n'+context_for_task(cid,r['iteration'],src)+'\n\nCOMPLETED TASKS:\n'+work}]
     try:answer=llm(p,prompt)
     except Exception as e:emit(r['id'],cid,'error',str(e));return jsonify(error=str(e)),500
     _,attaches,_=parse_directives(answer);valid=[];root=chat_root(cid)
