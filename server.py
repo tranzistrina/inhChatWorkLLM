@@ -112,7 +112,7 @@ def provider_models(pid):
     if not p:return jsonify(error='Провайдер не найден'),404
     try:
         result=discover_models(p['base_url'],p['api_key'])
-        return jsonify(models=result.models)
+        return jsonify(models=result.models,base_url=result.base_url)
     except ProviderConfigError as e:
         return jsonify(error=f'Не удалось получить модели: {e}'),502
 
@@ -123,9 +123,11 @@ def model_discovery():
     d=request.json or {}
     try:
         result=discover_models(str(d.get('base_url','')),str(d.get('api_key','')))
-        return jsonify(models=result.models)
+        return jsonify(models=result.models,base_url=result.base_url)
     except ProviderConfigError as e:
-        return jsonify(error=str(e) if str(e) else 'Не удалось получить модели'),400 if str(e) == 'Укажите Base URL' else 502
+        message=str(e) if str(e) else 'Не удалось получить модели'
+        status=400 if message.startswith(('Укажите Base URL','Base URL должен')) else 502
+        return jsonify(error=message),status
 
 
 @app.post('/api/providers')
