@@ -1805,3 +1805,58 @@ SQLite, JSON, файловой системой, Flask session и JavaScript glo
 Это состояние проекта на commit 90157d5. Любая следующая итерация должна
 сначала свериться с фактическим кодом, потому что этот файл является
 контекстом для рефакторинга, а не заменой исходникам.
+
+
+======================================================================
+ПОСЛЕДУЮЩАЯ ИТЕРАЦИЯ: PROVIDER/API REFACTOR (2026-09-18)
+======================================================================
+
+В этой итерации пользователь отдельно разрешил изменить provider/API, потому
+что фактический сценарий добавления новых API был признан неисправным.
+
+Изменения:
+1. Добавлен provider_service.py.
+   - единая нормализация Base URL;
+   - удаление случайно вставленных /models и /chat/completions;
+   - проверка http/https;
+   - fallback для OpenAI-compatible серверов: BASE и BASE/v1;
+   - единая генерация Authorization: Bearer;
+   - разбор нескольких распространённых форматов списка моделей;
+   - единый discovery helper.
+
+2. server.py теперь использует provider_service.py для:
+   - POST /api/providers;
+   - PATCH /api/providers/<pid>;
+   - POST /api/model-discovery;
+   - GET /api/providers/<pid>/models;
+   - LLM chat/completions adapter.
+
+3. Frontend provider flow:
+   - переключение в auto mode больше не вызывает discovery с пустым Base URL;
+   - если модель не выбрана, отправка формы сама запускает discovery;
+   - после discovery Base URL может быть заменён на реально найденный /v1 endpoint;
+   - после создания нового provider он автоматически становится активным;
+   - удаление provider обрабатывает ошибки;
+   - состояние выбранного provider не сбрасывается при обычном reload списка.
+
+4. Добавлены tests/test_provider_service.py с regression tests для:
+   - Base URL normalization;
+   - /v1 fallback;
+   - model extraction;
+   - Authorization;
+   - invalid URL;
+   - empty model list;
+   - discovery fallback.
+
+Важно:
+- HTTP-контракты существующих provider endpoints сохранены.
+- api_key не возвращается GET /api/providers.
+- Поведение PATCH с пустым api_key сохраняет старый ключ.
+- Новые изменения не должны считаться доказанными до запуска локального test suite.
+
+Следующий обязательный шаг:
+- выполнить python -m unittest discover -s tests -v;
+- выполнить python -m py_compile server.py provider_service.py workmode.py work_routes.py work_recovery.py llm_retry.py run_server.py;
+- вручную проверить добавление provider в manual и auto режиме;
+- проверить provider без /v1 и provider с /v1;
+- проверить duplicate name, edit, delete и model discovery.
