@@ -193,3 +193,9 @@ body:not(.dark) .typing-indicator{background:rgba(20,25,30,.045);border-color:rg
 body:not(.dark) .typing-indicator span{background:#59616c}
 body:not(.dark) .typing-orbit i{background:#353b44}
 body:not(.dark) .send.is-loading:after{border-color:rgba(255,255,255,.25);border-top-color:#fff}
+
+.settings-toggle{display:flex;align-items:flex-start;gap:12px;padding:12px 0;cursor:pointer}
+.settings-toggle input{width:18px;height:18px;margin-top:2px;accent-color:#222}
+.settings-toggle span{display:flex;flex-direction:column;gap:5px}
+.settings-toggle small{color:#777;font-size:12px;line-height:1.45}
+body.dark .settings-toggle small{color:#999}
