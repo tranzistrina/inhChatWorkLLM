@@ -116,7 +116,9 @@ def edit_provider(pid):
     name=str(d.get('name','')).strip();base=str(d.get('base_url','')).strip();model=str(d.get('model','')).strip()
     if not name or not base or not model:return jsonify(error='Заполните название, Base URL и модель'),400
     with db() as c:
-        try:c.execute('UPDATE providers SET name=?,base_url=?,api_key=?,model=?,kind=? WHERE id=? AND user_id=?',(name,base,d.get('api_key',''),model,d.get('kind','openai'),pid,session['uid']))
+        old=c.execute('SELECT api_key FROM providers WHERE id=? AND user_id=?',(pid,session['uid'])).fetchone()
+        key=d.get('api_key') or (old['api_key'] if old else '')
+        try:c.execute('UPDATE providers SET name=?,base_url=?,api_key=?,model=?,kind=? WHERE id=? AND user_id=?',(name,base,key,model,d.get('kind','openai'),pid,session['uid']))
         except sqlite3.IntegrityError:return jsonify(error='Провайдер с таким именем уже существует'),409
     return jsonify(ok=True)
 @app.delete('/api/providers/<int:pid>')
