@@ -179,6 +179,18 @@ def library_file(rel):
     if root not in p.parents or not p.is_file():return jsonify(error='Файл не найден'),404
     return send_file(p,as_attachment=True,download_name=p.name)
 
+@app.post('/api/chats/cleanup-temporary')
+@auth
+def cleanup_temporary():
+    with db() as c:
+        rows=c.execute('SELECT id FROM chats WHERE user_id=? AND temporary=1',(session['uid'],)).fetchall()
+        for r in rows:
+            cid=r['id'];c.execute('DELETE FROM work_events WHERE chat_id=? AND user_id=?',(cid,session['uid']));c.execute('DELETE FROM work_runs WHERE chat_id=? AND user_id=?',(cid,session['uid']));c.execute('DELETE FROM chats WHERE id=? AND user_id=?',(cid,session['uid']))
+    import shutil
+    for r in rows:
+        shutil.rmtree(WORK/'chats'/r['id'],ignore_errors=True);shutil.rmtree(UPLOADS/r['id'],ignore_errors=True)
+    return jsonify(ok=True,deleted=len(rows))
+
 @app.get('/api/chats')
 @auth
 def chats():
