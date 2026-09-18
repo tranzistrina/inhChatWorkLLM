@@ -15,6 +15,7 @@ with db() as c:
     if 'strict_formatting' not in cols: c.execute('ALTER TABLE work_runs ADD COLUMN strict_formatting INTEGER DEFAULT 0')
     if 'allow_invention' not in cols: c.execute('ALTER TABLE work_runs ADD COLUMN allow_invention INTEGER DEFAULT 0')
     if 'max_tasks' not in cols: c.execute('ALTER TABLE work_runs ADD COLUMN max_tasks INTEGER DEFAULT 12')
+    if 'recommended_tasks' not in cols: c.execute('ALTER TABLE work_runs ADD COLUMN recommended_tasks INTEGER DEFAULT 8')
     c.execute('''CREATE TABLE IF NOT EXISTS work_events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL,chat_id TEXT NOT NULL,user_id INTEGER NOT NULL,kind TEXT NOT NULL,message TEXT NOT NULL,data TEXT DEFAULT '{}',created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
 def meta_chat_context():
@@ -141,7 +142,7 @@ def materialize_task(cid,iteration,raw):
 @app.post('/api/work/intake/<cid>')
 @auth
 def intake(cid):
-    pid=int(request.form.get('provider_id') or 0);p=provider(pid);text=request.form.get('content','').strip();files=request.files.getlist('files');strict_formatting=request.form.get('strict_formatting','0').lower() in ('1','true','yes','on');allow_invention=request.form.get('allow_invention','0').lower() in ('1','true','yes','on');max_tasks=max(1,min(int(request.form.get('max_tasks') or 12),30))
+    pid=int(request.form.get('provider_id') or 0);p=provider(pid);text=request.form.get('content','').strip();files=request.files.getlist('files');strict_formatting=request.form.get('strict_formatting','0').lower() in ('1','true','yes','on');allow_invention=request.form.get('allow_invention','0').lower() in ('1','true','yes','on');max_tasks=max(1,min(int(request.form.get('max_tasks') or 12),30));recommended_tasks=max(1,min(int(request.form.get('recommended_tasks') or 8),30))
     if not p:return jsonify(error='Выберите провайдера'),400
     with db() as c:
         if not c.execute('SELECT id FROM chats WHERE id=? AND user_id=?',(cid,session['uid'])).fetchone():return jsonify(error='not_found'),404
@@ -149,7 +150,7 @@ def intake(cid):
     rid=str(uuid.uuid4());dest=iteration_root(cid,n)
     try:
         source,count,total=ingest_uploads(files,dest);source=[{'path':'iterations/'+str(n)+'/'+x['path'],'text':x['text']} for x in source]
-        with db() as c:c.execute('INSERT INTO work_runs(id,user_id,chat_id,request,source_files,plan,results,iteration,strict_formatting,allow_invention,max_tasks) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(rid,session['uid'],cid,text,json.dumps(source,ensure_ascii=False),'[]','[]',n,1 if strict_formatting else 0,1 if allow_invention else 0,max_tasks))
+        with db() as c:c.execute('INSERT INTO work_runs(id,user_id,chat_id,request,source_files,plan,results,iteration,strict_formatting,allow_invention,max_tasks,recommended_tasks) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(rid,session['uid'],cid,text,json.dumps(source,ensure_ascii=False),'[]','[]',n,1 if strict_formatting else 0,1 if allow_invention else 0,max_tasks,recommended_tasks))
         emit(rid,cid,'intake','Материалы загружены',{'iteration':n,'files':count,'bytes':total})
         return jsonify(run_id=rid,iteration=n,files_count=count,bytes=total,source=[{'path':x['path'],'size':len(x['text'])} for x in source])
     except Exception as e:return jsonify(error=str(e)),400
@@ -168,9 +169,9 @@ def work_status(cid):
 def plan(cid):
     d=request.json or {};p=provider(int(d.get('provider_id') or 0));r=run_row(cid)
     if not p or not r:return jsonify(error='Рабочая сессия или провайдер не найдены'),400
-    src=json.loads(r['source_files']);meta=bool(r['meta_analysis']) if 'meta_analysis' in r.keys() else False;max_tasks=int(r['max_tasks']) if 'max_tasks' in r.keys() else 12;emit(r['id'],cid,'plan_start','Составляю план задач')
+    src=json.loads(r['source_files']);meta=bool(r['meta_analysis']) if 'meta_analysis' in r.keys() else False;max_tasks=int(r['max_tasks']) if 'max_tasks' in r.keys() else 12;recommended_tasks=int(r['recommended_tasks']) if 'recommended_tasks' in r.keys() else 8;emit(r['id'],cid,'plan_start','Составляю план задач')
     try:
-        raw=llm(p,[{'role':'system','content':f'Planning stage. Return ONLY a JSON array with 1-{max_tasks} sequential tasks. Prefer exactly {min(max_tasks,8)} tasks for a standard laboratory report unless the source requires more or fewer. Each object has title and description. Do not execute anything.'},{'role':'user','content':r['request']+'\n\nSHARED LIBRARY:\n'+shared_library_context()+'\n\nCROSS-CHAT META ANALYSIS:\n'+(meta_chat_context() if meta else '(Выключен. Другие чаты недоступны.)')+'\n\nFILES:\n'+context_for_task(cid,r['iteration'],src)}]);tasks=parse_plan(raw,max_tasks)
+        raw=llm(p,[{'role':'system','content':f'Planning stage. Return ONLY a JSON array with 1-{max_tasks} sequential tasks. Prefer approximately {min(recommended_tasks,max_tasks)} tasks unless the source clearly requires fewer or the maximum limit makes that impossible. Each object has title and description. Do not execute anything.'},{'role':'user','content':r['request']+'\n\nSHARED LIBRARY:\n'+shared_library_context()+'\n\nCROSS-CHAT META ANALYSIS:\n'+(meta_chat_context() if meta else '(Выключен. Другие чаты недоступны.)')+'\n\nFILES:\n'+context_for_task(cid,r['iteration'],src)}]);tasks=parse_plan(raw,max_tasks)
         with db() as c:c.execute('UPDATE work_runs SET plan=?,results=? WHERE id=?',(json.dumps(tasks,ensure_ascii=False),'[]',r['id']))
         emit(r['id'],cid,'plan_done',f'План готов: {len(tasks)} задач',{'count':len(tasks)});return jsonify(tasks=tasks,plan_text=raw)
     except Exception as e:emit(r['id'],cid,'error',str(e));return jsonify(error=str(e)),500
