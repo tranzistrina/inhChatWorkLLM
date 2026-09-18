@@ -1,5 +1,6 @@
 import json, re
 from pathlib import Path
+from xml.sax.saxutils import escape
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.section import WD_SECTION
@@ -91,11 +92,11 @@ def build_pdf(d,out):
     for sec in d['sections']:
         h=str(sec.get('heading') or sec.get('title') or '').strip()
         if h: story += [Paragraph(h.rstrip('. '),center),Spacer(1,14)]
-        for x in sec.get('paragraphs',[]) or []: story.append(Paragraph(str(x).replace('&','&amp;'),body))
-        for x in sec.get('steps',[]) or []: story.append(Paragraph(str(x).replace('&','&amp;'),body))
+        for x in sec.get('paragraphs',[]) or []: story.append(Paragraph(escape(str(x)),body))
+        for x in sec.get('steps',[]) or []: story.append(Paragraph(escape(str(x)),body))
         for fig in sec.get('figures',[]) or []:
-            n+=1; story += [Paragraph(str(fig.get('reference') or f'Результат измерения представлен на рисунке {n}.').replace('&','&amp;'),body),Spacer(1,20),Paragraph(f'[ МЕСТО ДЛЯ РИСУНКА {n} ]',center),Spacer(1,20),Paragraph(cap(n,fig.get('caption')),center),Spacer(1,12)]
-        for x in sec.get('answers',[]) or []: story.append(Paragraph(str(x).replace('&','&amp;'),body))
+            n+=1; story += [Paragraph(escape(str(fig.get('reference') or f'Результат измерения представлен на рисунке {n}.')),body),Spacer(1,20),Paragraph(f'[ МЕСТО ДЛЯ РИСУНКА {n} ]',center),Spacer(1,20),Paragraph(escape(cap(n,fig.get('caption'))),center),Spacer(1,12)]
+        for x in sec.get('answers',[]) or []: story.append(Paragraph(escape(str(x)),body))
     def footer(c,doc): c.saveState(); c.setFont(fontname,14); c.drawCentredString(A4[0]/2,1*cm,str(doc.page) if doc.page>1 else ''); c.restoreState()
     doc.build(story,onFirstPage=footer,onLaterPages=footer)
 
