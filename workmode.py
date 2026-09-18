@@ -43,6 +43,8 @@ def ingest_uploads(files, dest):
                     if txt is not None: extracted.append({'path':str(q.relative_to(dest)),'text':txt})
         else:
             txt=text_from(out)
+            if txt is None and out.suffix.lower() in {'.docx','.pdf'}:
+                txt=document_text(out)
             if txt is not None: extracted.append({'path':name,'text':txt})
     return extracted,uploaded,total
 
