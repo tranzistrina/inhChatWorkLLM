@@ -4,6 +4,7 @@ from flask import Flask,request,jsonify,session,send_from_directory,send_file
 from werkzeug.security import generate_password_hash,check_password_hash
 from dotenv import load_dotenv
 from workmode import ingest_uploads,source_context,parse_plan
+from provider_service import ProviderConfigError, auth_headers, candidate_base_urls, discover_models, normalize_base_url, endpoint
 load_dotenv()
 ROOT=Path(__file__).resolve().parent;DATA=ROOT/'data';DATA.mkdir(exist_ok=True);WORK=ROOT/'workspace';WORK.mkdir(exist_ok=True);UPLOADS=WORK/'uploads';UPLOADS.mkdir(exist_ok=True);LIBRARY=WORK/'library';LIBRARY.mkdir(exist_ok=True);DB=DATA/'inhchat.db';USERS=ROOT/'users.json';PORT=int(os.getenv('PORT','6767'));DEEPSEEK=os.getenv('DEEPSEEK_BASE_URL','http://127.0.0.1:9655/v1')
 app=Flask(__name__,static_folder='static',static_url_path='/static');app.secret_key=os.getenv('APP_SECRET_KEY','change-me-in-.env');app.config['MAX_CONTENT_LENGTH']=32*1024*1024
@@ -39,9 +40,24 @@ def provider(pid):
  with db() as c:return c.execute('SELECT * FROM providers WHERE id=? AND user_id=?',(pid,session['uid'])).fetchone()
 def llm(p,messages):
  import requests
- h={'Content-Type':'application/json'}
- if p['api_key']:h['Authorization']='Bearer '+p['api_key']
- r=requests.post(p['base_url'].rstrip('/')+'/chat/completions',json={'model':p['model'],'messages':messages,'temperature':0.3},headers=h,timeout=300);r.raise_for_status();return r.json()['choices'][0]['message'].get('content','')
+ h={'Content-Type':'application/json',**auth_headers(p['api_key'])}
+ last_error=None
+ for base in candidate_base_urls(p['base_url']):
+  try:
+   r=requests.post(endpoint(base,'chat/completions'),json={'model':p['model'],'messages':messages,'temperature':0.3},headers=h,timeout=300)
+   if r.status_code == 404 and base != candidate_base_urls(p['base_url'])[-1]:
+    last_error=r
+    continue
+   r.raise_for_status()
+   data=r.json()
+   choices=data.get('choices') or []
+   if not choices: raise RuntimeError('API не вернул choices')
+   return choices[0].get('message',{}).get('content','')
+  except requests.HTTPError as exc:
+   last_error=exc
+   raise
+ if last_error: raise last_error
+ raise RuntimeError('Не удалось обратиться к API')
 def meta_chat_context(current_cid):
     with db() as c:
         rows=c.execute('SELECT title,messages FROM chats WHERE user_id=? AND id<>? AND temporary=0 ORDER BY updated_at DESC LIMIT 20',(session['uid'],current_cid)).fetchall()
@@ -87,58 +103,71 @@ def logout():session.clear();return jsonify(ok=True)
 def providers():
  with db() as c:r=c.execute('SELECT id,name,base_url,model,kind FROM providers WHERE user_id=?',(session['uid'],)).fetchall()
  return jsonify([dict(x) for x in r])
+
+
 @app.get('/api/providers/<int:pid>/models')
 @auth
 def provider_models(pid):
-    import requests
     p=provider(pid)
     if not p:return jsonify(error='Провайдер не найден'),404
     try:
-        h={'Authorization':'Bearer '+p['api_key']} if p['api_key'] else {}
-        r=requests.get(p['base_url'].rstrip('/')+'/models',headers=h,timeout=15);r.raise_for_status();data=r.json()
-        models=[x.get('id') for x in data.get('data',[]) if isinstance(x,dict) and x.get('id')]
-        return jsonify(models=models)
-    except Exception as e:return jsonify(error=f'Не удалось получить модели: {e}'),502
+        result=discover_models(p['base_url'],p['api_key'])
+        return jsonify(models=result.models)
+    except ProviderConfigError as e:
+        return jsonify(error=f'Не удалось получить модели: {e}'),502
+
 
 @app.post('/api/model-discovery')
 @auth
 def model_discovery():
-    import requests
-    d=request.json or {};base=str(d.get('base_url','')).strip();key=str(d.get('api_key',''))
-    if not base:return jsonify(error='Укажите Base URL'),400
+    d=request.json or {}
     try:
-        headers={'Authorization':'Bearer '+key} if key else {}
-        resp=requests.get(base.rstrip('/')+'/models',headers=headers,timeout=15);resp.raise_for_status()
-        data=resp.json();models=[x.get('id') for x in data.get('data',[]) if isinstance(x,dict) and x.get('id')]
-        return jsonify(models=models)
-    except Exception as e:return jsonify(error='Не удалось получить модели: '+str(e)),502
+        result=discover_models(str(d.get('base_url','')),str(d.get('api_key','')))
+        return jsonify(models=result.models)
+    except ProviderConfigError as e:
+        return jsonify(error=str(e) if str(e) else 'Не удалось получить модели'),400 if str(e) == 'Укажите Base URL' else 502
+
 
 @app.post('/api/providers')
 @auth
 def add_provider():
- d=request.json or {};name=d.get('name','').strip();base=d.get('base_url','').strip();model=d.get('model','').strip()
- if not name or not base or not model:return jsonify(error='Заполните название, Base URL и модель'),400
+ d=request.json or {}
+ name=str(d.get('name','')).strip()
+ try:base=normalize_base_url(d.get('base_url',''))
+ except ProviderConfigError as e:return jsonify(error=str(e)),400
+ model=str(d.get('model','')).strip()
+ if not name or not model:return jsonify(error='Заполните название, Base URL и модель'),400
  with db() as c:
-  try:r=c.execute('INSERT INTO providers(user_id,name,base_url,api_key,model,kind) VALUES(?,?,?,?,?,?)',(session['uid'],name,base,d.get('api_key',''),model,d.get('kind','openai')))
+  try:r=c.execute('INSERT INTO providers(user_id,name,base_url,api_key,model,kind) VALUES(?,?,?,?,?,?)',(session['uid'],name,base,str(d.get('api_key','')).strip(),model,d.get('kind','openai')))
   except sqlite3.IntegrityError:return jsonify(error='Провайдер с таким именем уже существует'),409
  return jsonify(id=r.lastrowid,name=name)
+
+
 @app.patch('/api/providers/<int:pid>')
 @auth
 def edit_provider(pid):
     d=request.json or {}
-    name=str(d.get('name','')).strip();base=str(d.get('base_url','')).strip();model=str(d.get('model','')).strip()
-    if not name or not base or not model:return jsonify(error='Заполните название, Base URL и модель'),400
+    name=str(d.get('name','')).strip()
+    try:base=normalize_base_url(d.get('base_url',''))
+    except ProviderConfigError as e:return jsonify(error=str(e)),400
+    model=str(d.get('model','')).strip()
+    if not name or not model:return jsonify(error='Заполните название, Base URL и модель'),400
     with db() as c:
         old=c.execute('SELECT api_key FROM providers WHERE id=? AND user_id=?',(pid,session['uid'])).fetchone()
-        key=d.get('api_key') or (old['api_key'] if old else '')
-        try:c.execute('UPDATE providers SET name=?,base_url=?,api_key=?,model=?,kind=? WHERE id=? AND user_id=?',(name,base,key,model,d.get('kind','openai'),pid,session['uid']))
+        if not old:return jsonify(error='Провайдер не найден'),404
+        key=str(d.get('api_key','')).strip() or old['api_key']
+        try:
+            c.execute('UPDATE providers SET name=?,base_url=?,api_key=?,model=?,kind=? WHERE id=? AND user_id=?',(name,base,key,model,d.get('kind','openai'),pid,session['uid']))
         except sqlite3.IntegrityError:return jsonify(error='Провайдер с таким именем уже существует'),409
     return jsonify(ok=True)
+
+
 @app.delete('/api/providers/<int:pid>')
 @auth
 def del_provider(pid):
  with db() as c:c.execute('DELETE FROM providers WHERE id=? AND user_id=?',(pid,session['uid']))
  return jsonify(ok=True)
+
 @app.get('/api/library')
 @auth
 def library():
