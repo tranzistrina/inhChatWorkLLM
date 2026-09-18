@@ -3,6 +3,7 @@ from pathlib import Path
 from flask import request, jsonify, send_file, session
 from server import app, db, auth, provider, llm, WORK, DEEPSEEK
 from workmode import ingest_uploads, source_context, parse_plan, create_archive
+from report_builder import build_report_files, strict_system_prompt
 from server import LIBRARY
 
 CHAT_ROOT = WORK / 'chats'; CHAT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -11,6 +12,7 @@ TEXT_EXT={'.txt','.md','.markdown','.rst','.py','.js','.ts','.tsx','.jsx','.json
 with db() as c:
     cols={r['name'] for r in c.execute('PRAGMA table_info(work_runs)').fetchall()}
     if 'iteration' not in cols: c.execute('ALTER TABLE work_runs ADD COLUMN iteration INTEGER DEFAULT 1')
+    if 'strict_formatting' not in cols: c.execute('ALTER TABLE work_runs ADD COLUMN strict_formatting INTEGER DEFAULT 0')
     c.execute('''CREATE TABLE IF NOT EXISTS work_events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL,chat_id TEXT NOT NULL,user_id INTEGER NOT NULL,kind TEXT NOT NULL,message TEXT NOT NULL,data TEXT DEFAULT '{}',created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
 def meta_chat_context():
@@ -137,7 +139,7 @@ def materialize_task(cid,iteration,raw):
 @app.post('/api/work/intake/<cid>')
 @auth
 def intake(cid):
-    pid=int(request.form.get('provider_id') or 0);p=provider(pid);text=request.form.get('content','').strip();files=request.files.getlist('files')
+    pid=int(request.form.get('provider_id') or 0);p=provider(pid);text=request.form.get('content','').strip();files=request.files.getlist('files');strict_formatting=request.form.get('strict_formatting','0').lower() in ('1','true','yes','on')
     if not p:return jsonify(error='Выберите провайдера'),400
     with db() as c:
         if not c.execute('SELECT id FROM chats WHERE id=? AND user_id=?',(cid,session['uid'])).fetchone():return jsonify(error='not_found'),404
@@ -145,7 +147,7 @@ def intake(cid):
     rid=str(uuid.uuid4());dest=iteration_root(cid,n)
     try:
         source,count,total=ingest_uploads(files,dest);source=[{'path':'iterations/'+str(n)+'/'+x['path'],'text':x['text']} for x in source]
-        with db() as c:c.execute('INSERT INTO work_runs(id,user_id,chat_id,request,source_files,plan,results,iteration) VALUES(?,?,?,?,?,?,?,?)',(rid,session['uid'],cid,text,json.dumps(source,ensure_ascii=False),'[]','[]',n))
+        with db() as c:c.execute('INSERT INTO work_runs(id,user_id,chat_id,request,source_files,plan,results,iteration,strict_formatting) VALUES(?,?,?,?,?,?,?,?,?)',(rid,session['uid'],cid,text,json.dumps(source,ensure_ascii=False),'[]','[]',n,1 if strict_formatting else 0))
         emit(rid,cid,'intake','Материалы загружены',{'iteration':n,'files':count,'bytes':total})
         return jsonify(run_id=rid,iteration=n,files_count=count,bytes=total,source=[{'path':x['path'],'size':len(x['text'])} for x in source])
     except Exception as e:return jsonify(error=str(e)),400
@@ -199,9 +201,21 @@ def final(cid):
     if not p or not r:return jsonify(error='Рабочая сессия или провайдер не найдены'),400
     results=json.loads(r['results']);src=json.loads(r['source_files']);meta=bool(r['meta_analysis']) if 'meta_analysis' in r.keys() else False;work='\n\n'.join(f'TASK {x["index"]+1}:\n{x["result"]}' for x in results);available='\n'.join('- '+x['path'] for x in all_chat_files(cid,r['iteration']))
     emit(r['id'],cid,'final_start','Готовлю итоговый ответ и выбираю вложения')
-    prompt=[{'role':'system','content':'Final synthesis stage. Prepare the final answer from completed task results. Do not invent work. Decide which files, if any, should be attached. Insert a file anywhere in the response with [[ATTACH: path]]. A selected file may be from any previous iteration of this same chat. The marker is rendered as a downloadable file card exactly at that position. Attach only files materially useful to the user. Do not attach every created file automatically.'},{'role':'user','content':r['request']+'\n\nSHARED LIBRARY:\n'+shared_library_context()+'\n\nCROSS-CHAT META ANALYSIS:\n'+(meta_chat_context() if meta else '(Выключен. Другие чаты недоступны.)')+'\n\nAVAILABLE FILES:\n'+available+'\n\nSOURCE FILES:\n'+context_for_task(cid,r['iteration'],src)+'\n\nCOMPLETED TASKS:\n'+work}]
+    strict=bool(r['strict_formatting']) if 'strict_formatting' in r.keys() else False
+    if strict:
+        prompt=[{'role':'system','content':strict_system_prompt()},{'role':'user','content':r['request']+'\n\nSOURCE FILES:\n'+context_for_task(cid,r['iteration'],src)+'\n\nCOMPLETED TASKS:\n'+work+'\n\nAVAILABLE FILES:\n'+available}]
+    else:
+        prompt=[{'role':'system','content':'Final synthesis stage. Prepare the final answer from completed task results. Do not invent work. Decide which files, if any, should be attached. Insert a file anywhere in the response with [[ATTACH: path]]. A selected file may be from any previous iteration of this same chat. Attach only files materially useful to the user.'},{'role':'user','content':r['request']+'\n\nSHARED LIBRARY:\n'+shared_library_context()+'\n\nCROSS-CHAT META ANALYSIS:\n'+(meta_chat_context() if meta else '(Выключен. Другие чаты недоступны.)')+'\n\nAVAILABLE FILES:\n'+available+'\n\nSOURCE FILES:\n'+context_for_task(cid,r['iteration'],src)+'\n\nCOMPLETED TASKS:\n'+work}]
     try:answer=llm(p,prompt)
     except Exception as e:emit(r['id'],cid,'error',str(e));return jsonify(error=str(e)),500
+    if strict:
+        try:
+            generated=build_report_files(answer,iteration_root(cid,r['iteration'])/'report','Отчет_ЛЗ_'+str(r['iteration']))
+            generated=[str(x.relative_to(chat_root(cid))) for x in generated]
+            answer='Готовый отчет сформирован в строгом формате. В документе оставлены места для рисунков и скриншотов.\n\n[[ATTACH: '+generated[0]+']]\n\n[[ATTACH: '+generated[1]+']]'
+            emit(r['id'],cid,'report_done','DOCX и PDF отчета сформированы',{'files':generated})
+        except Exception as e:
+            emit(r['id'],cid,'error','Не удалось сформировать отчет: '+str(e));return jsonify(error='Не удалось сформировать DOCX/PDF: '+str(e)),500
     _,attaches,_=parse_directives(answer);valid=[];root=chat_root(cid)
     for rel in attaches:
         try:pth=safe_file(root,rel)
