@@ -205,7 +205,7 @@ def final(cid):
     emit(r['id'],cid,'final_start','Готовлю итоговый ответ и выбираю вложения')
     strict=bool(r['strict_formatting']) if 'strict_formatting' in r.keys() else False
     if strict:
-        prompt=[{'role':'system','content':strict_system_prompt()},{'role':'user','content':r['request']+'\n\nSOURCE FILES:\n'+context_for_task(cid,r['iteration'],src)+'\n\nCOMPLETED TASKS:\n'+work+'\n\nAVAILABLE FILES:\n'+available}]
+        prompt=[{'role':'system','content':strict_system_prompt(bool(r['allow_invention']) if 'allow_invention' in r.keys() else False)},{'role':'user','content':r['request']+'\n\nSOURCE FILES:\n'+context_for_task(cid,r['iteration'],src)+'\n\nCOMPLETED TASKS:\n'+work+'\n\nAVAILABLE FILES:\n'+available}]
     else:
         prompt=[{'role':'system','content':'Final synthesis stage. Prepare the final answer from completed task results. Do not invent work. Decide which files, if any, should be attached. Insert a file anywhere in the response with [[ATTACH: path]]. A selected file may be from any previous iteration of this same chat. Attach only files materially useful to the user.'},{'role':'user','content':r['request']+'\n\nSHARED LIBRARY:\n'+shared_library_context()+'\n\nCROSS-CHAT META ANALYSIS:\n'+(meta_chat_context() if meta else '(Выключен. Другие чаты недоступны.)')+'\n\nAVAILABLE FILES:\n'+available+'\n\nSOURCE FILES:\n'+context_for_task(cid,r['iteration'],src)+'\n\nCOMPLETED TASKS:\n'+work}]
     try:answer=llm(p,prompt)
