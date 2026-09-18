@@ -83,7 +83,12 @@ def del_provider(pid):
 @app.get('/api/chats')
 @auth
 def chats():
- with db() as c:r=c.execute('SELECT id,title,provider_id,archived,updated_at FROM chats WHERE user_id=? ORDER BY archived ASC,updated_at DESC',(session['uid'],)).fetchall()
+ with db() as c:
+  empty=c.execute("SELECT id FROM chats WHERE user_id=? AND (messages='[]' OR messages='' OR messages IS NULL)",(session['uid'],)).fetchall()
+  for r in empty:
+   cid=r['id'];c.execute('DELETE FROM work_events WHERE chat_id=? AND user_id=?',(cid,session['uid']));c.execute('DELETE FROM work_runs WHERE chat_id=? AND user_id=?',(cid,session['uid']))
+   import shutil;shutil.rmtree(WORK/'chats'/cid,ignore_errors=True);shutil.rmtree(UPLOADS/cid,ignore_errors=True)
+  r=c.execute('SELECT id,title,provider_id,archived,updated_at FROM chats WHERE user_id=? ORDER BY archived ASC,updated_at DESC',(session['uid'],)).fetchall()
  return jsonify([dict(x) for x in r])
 @app.post('/api/chats')
 @auth
