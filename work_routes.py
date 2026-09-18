@@ -75,6 +75,7 @@ def parse_directives(raw):
     copies=[];attaches=[];archives=[]
     for m in re.finditer(r'COPY_FROM:\s*([^\n]+?)\s*=>\s*([^\n]+)',raw or '',re.I):copies.append((m.group(1).strip(),m.group(2).strip()))
     for m in re.finditer(r'ATTACH:\s*([^\n]+)',raw or '',re.I):attaches += [x.strip() for x in re.split(r'[,;]',m.group(1)) if x.strip()]
+    for m in re.finditer(r'\[\[ATTACH:\s*([^\]]+)\]\]',raw or '',re.I):attaches.append(m.group(1).strip())
     for m in re.finditer(r'ARCHIVE:\s*([^\n]+)\nFILES:\s*([^\n]+)',raw or '',re.I):archives.append((m.group(1).strip(),[x.strip() for x in re.split(r'[,;]',m.group(2)) if x.strip()]))
     return copies,attaches,archives
 
@@ -164,7 +165,7 @@ def final(cid):
     if not p or not r:return jsonify(error='Рабочая сессия или провайдер не найдены'),400
     results=json.loads(r['results']);src=json.loads(r['source_files']);work='\n\n'.join(f'TASK {x["index"]+1}:\n{x["result"]}' for x in results);available='\n'.join('- '+x['path'] for x in all_chat_files(cid,r['iteration']))
     emit(r['id'],cid,'final_start','Готовлю итоговый ответ и выбираю вложения')
-    prompt=[{'role':'system','content':'Final synthesis stage. Prepare the final answer from completed task results. Do not invent work. Decide which files, if any, should be attached. Put EACH selected path on its own line as ATTACH: path. A selected file may be from any previous iteration of this same chat. Attach only files materially useful to the user. Do not attach every created file automatically.'},{'role':'user','content':r['request']+'\n\nAVAILABLE FILES:\n'+available+'\n\nSOURCE FILES:\n'+context_for_task(cid,r['iteration'],src)+'\n\nCOMPLETED TASKS:\n'+work}]
+    prompt=[{'role':'system','content':'Final synthesis stage. Prepare the final answer from completed task results. Do not invent work. Decide which files, if any, should be attached. Insert a file anywhere in the response with [[ATTACH: path]]. A selected file may be from any previous iteration of this same chat. The marker is rendered as a downloadable file card exactly at that position. Attach only files materially useful to the user. Do not attach every created file automatically.'},{'role':'user','content':r['request']+'\n\nAVAILABLE FILES:\n'+available+'\n\nSOURCE FILES:\n'+context_for_task(cid,r['iteration'],src)+'\n\nCOMPLETED TASKS:\n'+work}]
     try:answer=llm(p,prompt)
     except Exception as e:emit(r['id'],cid,'error',str(e));return jsonify(error=str(e)),500
     _,attaches,_=parse_directives(answer);valid=[];root=chat_root(cid)
