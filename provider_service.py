@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
+from typing import Optional
 
 import requests
 
@@ -84,7 +85,7 @@ def discover_models(
     timeout: float = 15,
     session=requests,
 ) -> ModelDiscoveryResult:
-    last_error: Exception | None = None
+    last_error: Optional[Exception] = None
 
     for candidate in candidate_base_urls(base_url):
         try:
