@@ -1,4 +1,4 @@
-import json, re, shutil, uuid, zipfile
+import json, re, shutil, uuid, zipfile, subprocess
 from pathlib import Path
 from flask import request, jsonify, send_file, session
 from server import app, db, auth, provider, llm, WORK, DEEPSEEK
