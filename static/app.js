@@ -2,17 +2,62 @@ const $=s=>document.querySelector(s);let current=null,workMode=false,metaAnalysi
 async function api(url,opt={}){const r=await fetch(url,opt);const d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.error||'Ошибка запроса');return d}
 async function boot(){const m=await api('/api/me');if(!m.user){$('#auth').classList.remove('hidden');return}await api('/api/chats/cleanup-temporary',{method:'POST'}).catch(()=>{});$('#app').classList.remove('hidden');await loadProviders();await loadChats();await refreshWorkspace()}
 $('#authSubmit').onclick=async()=>{try{await api('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:$('#username').value,password:$('#password').value})});$('#authError').textContent='';$('#auth').classList.add('hidden');$('#app').classList.remove('hidden');await loadProviders();await loadChats();await refreshWorkspace()}catch(e){$('#authError').textContent=e.message}};
-async function loadProviders(){providers=await api('/api/providers');if(!activeProvider&&providers[0])activeProvider=providers[0].id;renderProviders();renderProviderSelect()}
+async function loadProviders(preferredId=null){
+ providers=await api('/api/providers');
+ if(preferredId && providers.some(p=>p.id===preferredId)) activeProvider=preferredId;
+ else if(activeProvider && providers.some(p=>p.id===activeProvider)){}
+ else activeProvider=providers[0]?.id||null;
+ renderProviders();renderProviderSelect();
+}
 function renderProviders(){let h='';for(const p of providers){h+='<div class="provider-row"><div><strong>'+esc(p.name)+'</strong><span>'+esc(p.model)+' · '+esc(p.base_url)+'</span></div><div><button class="ghost" onclick="useProvider('+p.id+')">'+(activeProvider===p.id?'Выбран':'Выбрать')+'</button><button class="ghost" onclick="editProvider('+p.id+')">Изменить</button><button class="icon-btn danger" onclick="delProvider('+p.id+')">×</button></div></div>'}$('#providers').innerHTML=h||'<div class="empty-note">Провайдеров пока нет.</div>'}
 function renderProviderSelect(){const s=$('#providerSelect');if(!s)return;s.innerHTML=providers.map(p=>`<option value="${p.id}" ${p.id===activeProvider?'selected':''}>${esc(p.name)} · ${esc(p.model)}</option>`).join('')}
-window.useProvider=id=>{activeProvider=id;renderProviders();renderProviderSelect()};window.delProvider=async id=>{await api('/api/providers/'+id,{method:'DELETE'});if(activeProvider===id)activeProvider=null;await loadProviders()};$('#providerSelect').onchange=e=>{activeProvider=Number(e.target.value);renderProviders()};
+window.useProvider=id=>{activeProvider=id;renderProviders();renderProviderSelect()};
+window.delProvider=async id=>{try{await api('/api/providers/'+id,{method:'DELETE'});if(activeProvider===id)activeProvider=null;await loadProviders()}catch(e){alert(e.message)}};
+$('#providerSelect').onchange=e=>{activeProvider=Number(e.target.value);renderProviders()};
 let editingProvider=null;
-async function discoverModels(){const base=$('#pBase').value.trim(),key=$('#pKey').value;if(!base)return;try{const d=await api('/api/model-discovery',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({base_url:base,api_key:key})});$('#modelSelect').innerHTML=(d.models||[]).map(x=>'<option value="'+esc(x)+'">'+esc(x)+'</option>').join('');if(!d.models?.length)throw Error('API не вернул список моделей')}catch(e){alert(e.message)}}
-function syncProviderMode(){const auto=$('#providerMode').value==='auto';$('#manualModel').classList.toggle('hidden',auto);$('#autoModel').classList.toggle('hidden',!auto);$('#providerDiscover').classList.toggle('hidden',!auto);if(auto)discoverModels()}
-$('#providerMode').onchange=syncProviderMode;$('#providerDiscover').onclick=discoverModels;
+async function discoverModels(){
+ const base=$('#pBase').value.trim(),key=$('#pKey').value;
+ if(!base)throw Error('Укажите Base URL');
+ try{
+  const d=await api('/api/model-discovery',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({base_url:base,api_key:key})});
+  if(d.base_url)$('#pBase').value=d.base_url;
+  const models=d.models||[];
+  $('#modelSelect').innerHTML=models.map(x=>'<option value="'+esc(x)+'">'+esc(x)+'</option>').join('');
+  if(!models.length)throw Error('API не вернул список моделей');
+  $('#modelSelect').value=models[0];
+  return {model:models[0],base_url:d.base_url||base};
+ }catch(e){throw e}
+}
+function syncProviderMode(){
+ const auto=$('#providerMode').value==='auto';
+ $('#manualModel').classList.toggle('hidden',auto);
+ $('#autoModel').classList.toggle('hidden',!auto);
+ $('#providerDiscover').classList.toggle('hidden',!auto);
+ if(!auto)$('#modelSelect').innerHTML='';
+}
+$('#providerMode').onchange=syncProviderMode;
+$('#providerDiscover').onclick=async()=>{try{await discoverModels()}catch(e){alert(e.message)}};
 
 window.editProvider=async id=>{const p=providers.find(x=>x.id===id);if(!p)return;editingProvider=p;$('#pName').value=p.name;$('#pBase').value=p.base_url;$('#pModel').value=p.model;$('#pKey').value='';$('#providerMode').value='manual';syncProviderMode();$('#providerSubmit').textContent='Сохранить изменения'};
-$('#providerForm').onsubmit=async e=>{e.preventDefault();try{const auto=$('#providerMode').value==='auto';const model=auto?$('#modelSelect').value:$('#pModel').value;const body={name:$('#pName').value,base_url:$('#pBase').value,model,api_key:$('#pKey').value};if(!model)throw Error('Выберите модель');if(editingProvider)await api('/api/providers/'+editingProvider.id,{method:'PATCH',headers:{'Content-Type':'application/json'},body});else await api('/api/providers',{method:'POST',headers:{'Content-Type':'application/json'},body});editingProvider=null;$('#providerSubmit').textContent='Добавить API';e.target.reset();syncProviderMode();await loadProviders()}catch(x){alert(x.message)}};
+$('#providerForm').onsubmit=async e=>{
+ e.preventDefault();
+ const submit=$('#providerSubmit');
+ const oldText=submit.textContent;
+ submit.disabled=true;
+ try{
+  const auto=$('#providerMode').value==='auto';
+  let model=auto?$('#modelSelect').value:$('#pModel').value.trim();
+  if(auto&&!model){const discovered=await discoverModels();model=discovered.model}
+  if(!model)throw Error('Выберите модель');
+  const body={name:$('#pName').value.trim(),base_url:$('#pBase').value.trim(),model,api_key:$('#pKey').value};
+  if(!body.name)throw Error('Укажите название API');
+  let savedId=null;
+  if(editingProvider){await api('/api/providers/'+editingProvider.id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});savedId=editingProvider.id}
+  else{const saved=await api('/api/providers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});savedId=saved.id}
+  editingProvider=null;submit.textContent='Добавить API';e.target.reset();$('#modelSelect').innerHTML='';syncProviderMode();await loadProviders(savedId);
+ }catch(x){alert(x.message)}
+ finally{submit.disabled=false;if(!editingProvider)submit.textContent='Добавить API';else submit.textContent=oldText}
+};
 
 async function loadChats(){const cs=await api('/api/chats');const active=cs.filter(c=>!c.archived),archived=cs.filter(c=>c.archived);const row=c=>`<div class="chat-row ${current===c.id?'active':''}"><button class="chat-item" onclick="openChat('${c.id}')"><span>${esc(c.title)}</span></button><button class="chat-more" onclick="event.stopPropagation();toggleChatMenu('${c.id}')">•••</button><div id="menu-${c.id}" class="chat-menu"><button onclick="renameChat('${c.id}')">Переименовать</button><button onclick="archiveChat('${c.id}',${c.archived?'false':'true'})">${c.archived?'Разархивировать':'Архивировать'}</button><button class="danger-text" onclick="deleteChat('${c.id}')">Удалить</button></div></div>`;$('#chatList').innerHTML=(active.length?`<div class="chat-section">Чаты</div>${active.map(row).join('')}`:'')+(archived.length?`<div class="chat-section archived-label">Архив</div>${archived.map(row).join('')}`:'')||'<div class="empty-note">Чатов пока нет</div>';if(!current){if(active[0])await openChat(active[0].id);else if(archived[0])await openChat(archived[0].id);else await createChat()}}
 window.toggleChatMenu=id=>{document.querySelectorAll('.chat-menu').forEach(x=>{if(x.id!=='menu-'+id)x.classList.remove('show')});document.querySelector('#menu-'+id)?.classList.toggle('show')};
