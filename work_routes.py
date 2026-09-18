@@ -13,6 +13,17 @@ with db() as c:
     if 'iteration' not in cols: c.execute('ALTER TABLE work_runs ADD COLUMN iteration INTEGER DEFAULT 1')
     c.execute('''CREATE TABLE IF NOT EXISTS work_events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL,chat_id TEXT NOT NULL,user_id INTEGER NOT NULL,kind TEXT NOT NULL,message TEXT NOT NULL,data TEXT DEFAULT '{}',created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
+def meta_chat_context():
+    with db() as c:
+        rows=c.execute('SELECT title,messages FROM chats WHERE user_id=? AND id<>? AND temporary=0 ORDER BY updated_at DESC LIMIT 20',(session['uid'],request.view_args.get('cid'))).fetchall()
+    out=[]
+    for r in rows:
+        try:
+            ms=json.loads(r['messages']);txt='\n'.join(str(m.get('content','')) for m in ms[-6:] if m.get('role') in ('user','assistant'))
+            if txt:out.append('CHAT: '+r['title']+'\n'+txt[:12000])
+        except Exception:pass
+    return '\n\n'.join(out)[:250000] if out else '(Другие чаты недоступны или пусты)'
+
 def shared_library_context():
     root=(LIBRARY/str(session['uid'])).resolve();root.mkdir(parents=True,exist_ok=True);out=[]
     for p in root.rglob('*'):
@@ -153,9 +164,9 @@ def work_status(cid):
 def plan(cid):
     d=request.json or {};p=provider(int(d.get('provider_id') or 0));r=run_row(cid)
     if not p or not r:return jsonify(error='Рабочая сессия или провайдер не найдены'),400
-    src=json.loads(r['source_files']);emit(r['id'],cid,'plan_start','Составляю план задач')
+    src=json.loads(r['source_files']);meta=bool(r['meta_analysis']) if 'meta_analysis' in r.keys() else False;emit(r['id'],cid,'plan_start','Составляю план задач')
     try:
-        raw=llm(p,[{'role':'system','content':'Planning stage. Return ONLY a JSON array with 1-12 sequential tasks. Each object has title and description. Do not execute anything.'},{'role':'user','content':r['request']+'\n\nSHARED LIBRARY:\n'+shared_library_context()+'\n\nFILES:\n'+context_for_task(cid,r['iteration'],src)}]);tasks=parse_plan(raw)
+        raw=llm(p,[{'role':'system','content':'Planning stage. Return ONLY a JSON array with 1-12 sequential tasks. Each object has title and description. Do not execute anything.'},{'role':'user','content':r['request']+'\n\nSHARED LIBRARY:\n'+shared_library_context()+'\n\nCROSS-CHAT META ANALYSIS:\n'+(meta_chat_context() if meta else '(Выключен. Другие чаты недоступны.)')+'\n\nFILES:\n'+context_for_task(cid,r['iteration'],src)}]);tasks=parse_plan(raw)
         with db() as c:c.execute('UPDATE work_runs SET plan=?,results=? WHERE id=?',(json.dumps(tasks,ensure_ascii=False),'[]',r['id']))
         emit(r['id'],cid,'plan_done',f'План готов: {len(tasks)} задач',{'count':len(tasks)});return jsonify(tasks=tasks,plan_text=raw)
     except Exception as e:emit(r['id'],cid,'error',str(e));return jsonify(error=str(e)),500
@@ -167,7 +178,7 @@ def task(cid):
     if not p or not r:return jsonify(error='Рабочая сессия или провайдер не найдены'),400
     tasks=json.loads(r['plan']);results=json.loads(r['results'])
     if idx<0 or idx>=len(tasks):return jsonify(error='Неверный номер задачи'),400
-    src=json.loads(r['source_files']);previous='\n\n'.join(f'TASK {x["index"]+1}:\n{x["result"]}' for x in results);available='\n'.join('- '+x['path'] for x in all_chat_files(cid,r['iteration']))
+    src=json.loads(r['source_files']);meta=bool(r['meta_analysis']) if 'meta_analysis' in r.keys() else False;previous='\n\n'.join(f'TASK {x["index"]+1}:\n{x["result"]}' for x in results);available='\n'.join('- '+x['path'] for x in all_chat_files(cid,r['iteration']))
     prompt=[{'role':'system','content':'''Execution stage. Execute ONLY the assigned task. This chat is isolated. You can read any AVAILABLE FILE from this chat, including previous iterations. You can copy a previous file into the current iteration.
 Create text artifacts with FILE:path followed by full content. Paths after FILE are relative to the CURRENT iteration.
 Copy with COPY_FROM: iterations/N/path => destination/path.
@@ -186,7 +197,7 @@ Do not perform other tasks.'''.strip()},{'role':'user','content':f'Original requ
 def final(cid):
     d=request.json or {};p=provider(int(d.get('provider_id') or 0));r=run_row(cid)
     if not p or not r:return jsonify(error='Рабочая сессия или провайдер не найдены'),400
-    results=json.loads(r['results']);src=json.loads(r['source_files']);work='\n\n'.join(f'TASK {x["index"]+1}:\n{x["result"]}' for x in results);available='\n'.join('- '+x['path'] for x in all_chat_files(cid,r['iteration']))
+    results=json.loads(r['results']);src=json.loads(r['source_files']);meta=bool(r['meta_analysis']) if 'meta_analysis' in r.keys() else False;work='\n\n'.join(f'TASK {x["index"]+1}:\n{x["result"]}' for x in results);available='\n'.join('- '+x['path'] for x in all_chat_files(cid,r['iteration']))
     emit(r['id'],cid,'final_start','Готовлю итоговый ответ и выбираю вложения')
     prompt=[{'role':'system','content':'Final synthesis stage. Prepare the final answer from completed task results. Do not invent work. Decide which files, if any, should be attached. Insert a file anywhere in the response with [[ATTACH: path]]. A selected file may be from any previous iteration of this same chat. The marker is rendered as a downloadable file card exactly at that position. Attach only files materially useful to the user. Do not attach every created file automatically.'},{'role':'user','content':r['request']+'\n\nSHARED LIBRARY:\n'+shared_library_context()+'\n\nAVAILABLE FILES:\n'+available+'\n\nSOURCE FILES:\n'+context_for_task(cid,r['iteration'],src)+'\n\nCOMPLETED TASKS:\n'+work}]
     try:answer=llm(p,prompt)
