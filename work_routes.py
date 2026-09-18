@@ -207,3 +207,21 @@ def deepseek_status():
     import requests
     try:r=requests.get(DEEPSEEK.rstrip('/')+'/models',timeout=3);return jsonify(ok=r.ok,models=r.json().get('data',[]))
     except Exception as e:return jsonify(ok=False,error=str(e))
+
+
+@app.get('/api/work/continue/<cid>')
+@auth
+def work_continue(cid):
+    r=run_row(cid)
+    if not r:
+        return jsonify(active=False,tasks=[],next_index=None,can_finalize=False)
+    tasks=json.loads(r['plan'] or '[]')
+    results=json.loads(r['results'] or '[]')
+    done={int(x['index']) for x in results if 'index' in x}
+    missing=[i for i in range(len(tasks)) if i not in done]
+    return jsonify(active=not bool(r['final_answer']),run_id=r['id'],iteration=r['iteration'],tasks=tasks,next_index=(missing[0] if missing else None),can_finalize=bool(tasks) and not missing and not r['final_answer'])
+
+@app.post('/api/work/continue/<cid>')
+@auth
+def work_continue_post(cid):
+    return work_continue(cid)
