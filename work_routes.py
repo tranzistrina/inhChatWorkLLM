@@ -75,7 +75,7 @@ def parse_directives(raw):
     copies=[];attaches=[];archives=[]
     for m in re.finditer(r'COPY_FROM:\s*([^\n]+?)\s*=>\s*([^\n]+)',raw or '',re.I):copies.append((m.group(1).strip(),m.group(2).strip()))
     for m in re.finditer(r'ATTACH:\s*([^\n]+)',raw or '',re.I):attaches += [x.strip() for x in re.split(r'[,;]',m.group(1)) if x.strip()]
-    for m in re.finditer(r'\[\[ATTACH:\s*([^\]]+)\]\]',raw or '',re.I):attaches.append(m.group(1).strip())
+    for m in re.finditer(r'\[\[ATTACH:\s*([^\]]+)\]\]',raw or '',re.I):attaches.append(m.group(1).strip().replace('\\_', '_'))
     for m in re.finditer(r'ARCHIVE:\s*([^\n]+)\nFILES:\s*([^\n]+)',raw or '',re.I):archives.append((m.group(1).strip(),[x.strip() for x in re.split(r'[,;]',m.group(2)) if x.strip()]))
     return copies,attaches,archives
 
