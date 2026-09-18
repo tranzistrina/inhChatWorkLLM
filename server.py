@@ -9,11 +9,13 @@ ROOT=Path(__file__).resolve().parent;DATA=ROOT/'data';DATA.mkdir(exist_ok=True);
 app=Flask(__name__,static_folder='static',static_url_path='/static');app.secret_key=os.getenv('APP_SECRET_KEY','change-me-in-.env');app.config['MAX_CONTENT_LENGTH']=32*1024*1024
 
 def db():c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;return c
-with db() as c:c.executescript('CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,email TEXT UNIQUE NOT NULL,password_hash TEXT NOT NULL,created_at DATETIME DEFAULT CURRENT_TIMESTAMP);CREATE TABLE IF NOT EXISTS providers(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL,name TEXT NOT NULL,base_url TEXT NOT NULL,api_key TEXT DEFAULT "",model TEXT NOT NULL,kind TEXT DEFAULT "openai",created_at DATETIME DEFAULT CURRENT_TIMESTAMP,UNIQUE(user_id,name));CREATE TABLE IF NOT EXISTS chats(id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,title TEXT NOT NULL,messages TEXT NOT NULL,provider_id INTEGER,archived INTEGER DEFAULT 0,created_at DATETIME DEFAULT CURRENT_TIMESTAMP,updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);CREATE TABLE IF NOT EXISTS work_runs(id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,chat_id TEXT NOT NULL,request TEXT NOT NULL,source_files TEXT NOT NULL,plan TEXT NOT NULL,results TEXT NOT NULL,final_answer TEXT DEFAULT "",created_at DATETIME DEFAULT CURRENT_TIMESTAMP);')
+with db() as c:c.executescript('CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,email TEXT UNIQUE NOT NULL,password_hash TEXT NOT NULL,created_at DATETIME DEFAULT CURRENT_TIMESTAMP);CREATE TABLE IF NOT EXISTS providers(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL,name TEXT NOT NULL,base_url TEXT NOT NULL,api_key TEXT DEFAULT "",model TEXT NOT NULL,kind TEXT DEFAULT "openai",created_at DATETIME DEFAULT CURRENT_TIMESTAMP,UNIQUE(user_id,name));CREATE TABLE IF NOT EXISTS chats(id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,title TEXT NOT NULL,messages TEXT NOT NULL,provider_id INTEGER,archived INTEGER DEFAULT 0,meta_analysis INTEGER DEFAULT 0,temporary INTEGER DEFAULT 0,created_at DATETIME DEFAULT CURRENT_TIMESTAMP,updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);CREATE TABLE IF NOT EXISTS work_runs(id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,chat_id TEXT NOT NULL,request TEXT NOT NULL,source_files TEXT NOT NULL,plan TEXT NOT NULL,results TEXT NOT NULL,final_answer TEXT DEFAULT "",created_at DATETIME DEFAULT CURRENT_TIMESTAMP);')
 
 with db() as c:
     cols={r['name'] for r in c.execute('PRAGMA table_info(chats)').fetchall()}
     if 'archived' not in cols: c.execute('ALTER TABLE chats ADD COLUMN archived INTEGER DEFAULT 0')
+    if 'meta_analysis' not in cols: c.execute('ALTER TABLE chats ADD COLUMN meta_analysis INTEGER DEFAULT 0')
+    if 'temporary' not in cols: c.execute('ALTER TABLE chats ADD COLUMN temporary INTEGER DEFAULT 0')
 
 def users():
  if not USERS.exists():USERS.write_text(json.dumps([{'username':'admin','password':'676769'}],ensure_ascii=False,indent=2)+'\n');USERS.chmod(0o600)
@@ -40,6 +42,17 @@ def llm(p,messages):
  h={'Content-Type':'application/json'}
  if p['api_key']:h['Authorization']='Bearer '+p['api_key']
  r=requests.post(p['base_url'].rstrip('/')+'/chat/completions',json={'model':p['model'],'messages':messages,'temperature':0.3},headers=h,timeout=300);r.raise_for_status();return r.json()['choices'][0]['message'].get('content','')
+def meta_chat_context(current_cid):
+    with db() as c:
+        rows=c.execute('SELECT title,messages FROM chats WHERE user_id=? AND id<>? AND temporary=0 ORDER BY updated_at DESC LIMIT 20',(session['uid'],current_cid)).fetchall()
+    chunks=[]
+    for r in rows:
+        try:
+            ms=json.loads(r['messages']);txt='\n'.join(str(m.get('content','')) for m in ms[-6:] if m.get('role') in ('user','assistant'))
+            if txt:chunks.append('CHAT: '+r['title']+'\n'+txt[:12000])
+        except Exception:pass
+    return '\n\n'.join(chunks)[:250000] if chunks else '(Другие чаты недоступны или пусты)'
+
 def library_text():
     root=(LIBRARY/str(session['uid'])).resolve();root.mkdir(parents=True,exist_ok=True);out=[]
     for p in root.rglob('*'):
@@ -174,20 +187,20 @@ def chats():
   for r in empty:
    cid=r['id'];c.execute('DELETE FROM work_events WHERE chat_id=? AND user_id=?',(cid,session['uid']));c.execute('DELETE FROM work_runs WHERE chat_id=? AND user_id=?',(cid,session['uid']))
    import shutil;shutil.rmtree(WORK/'chats'/cid,ignore_errors=True);shutil.rmtree(UPLOADS/cid,ignore_errors=True)
-  r=c.execute('SELECT id,title,provider_id,archived,updated_at FROM chats WHERE user_id=? ORDER BY archived ASC,updated_at DESC',(session['uid'],)).fetchall()
+  r=c.execute('SELECT id,title,provider_id,archived,meta_analysis,temporary,updated_at FROM chats WHERE user_id=? AND temporary=0 ORDER BY archived ASC,updated_at DESC',(session['uid'],)).fetchall()
  return jsonify([dict(x) for x in r])
 @app.post('/api/chats')
 @auth
 def new_chat():
- d=request.json or {};cid=str(uuid.uuid4());title=d.get('title','Новый чат')
- with db() as c:c.execute('INSERT INTO chats(id,user_id,title,messages,provider_id) VALUES(?,?,?,?,?)',(cid,session['uid'],title,'[]',d.get('provider_id')))
+ d=request.json or {};cid=str(uuid.uuid4());title=d.get('title','Новый чат');temporary=1 if bool(d.get('temporary')) else 0;meta=1 if bool(d.get('meta_analysis')) else 0
+ with db() as c:c.execute('INSERT INTO chats(id,user_id,title,messages,provider_id,meta_analysis,temporary) VALUES(?,?,?,?,?,?,?)',(cid,session['uid'],title,'[]',d.get('provider_id'),meta,temporary))
  return jsonify(id=cid,title=title)
 @app.patch('/api/chats/<cid>')
 @auth
 def edit_chat(cid):
     d=request.json or {}
     title=d.get('title')
-    archived=d.get('archived')
+    archived=d.get('archived');meta=d.get('meta_analysis');temporary=d.get('temporary')
     with db() as c:
         r=c.execute('SELECT id FROM chats WHERE id=? AND user_id=?',(cid,session['uid'])).fetchone()
         if not r:return jsonify(error='not_found'),404
@@ -197,6 +210,8 @@ def edit_chat(cid):
             c.execute('UPDATE chats SET title=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?',(title,cid,session['uid']))
         if archived is not None:
             c.execute('UPDATE chats SET archived=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?',(1 if bool(archived) else 0,cid,session['uid']))
+        if meta is not None:c.execute('UPDATE chats SET meta_analysis=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?',(1 if bool(meta) else 0,cid,session['uid']))
+        if temporary is not None:c.execute('UPDATE chats SET temporary=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?',(1 if bool(temporary) else 0,cid,session['uid']))
     return jsonify(ok=True)
 
 @app.delete('/api/chats/<cid>')
@@ -242,6 +257,7 @@ def message(cid):
     history=json.loads(chat['messages'])
     messages=[{'role':'system','content':'Ты полезный ассистент. Отвечай по существу и используй доступные материалы. Общая библиотека файлов доступна между чатами. Используй её только когда это нужно.\\n\\nОБЩАЯ БИБЛИОТЕКА:\\n'+library_text()}]
     messages += [{'role':m['role'],'content':m.get('content','')} for m in history[-20:] if m.get('role') in ('user','assistant')]
+    if chat['meta_analysis']:messages.append({'role':'system','content':'МЕТААНАЛИЗ ВКЛЮЧЕН. Контекст других чатов пользователя:\n\n'+meta_chat_context(cid)})
     if source:messages.append({'role':'user','content':source_context(source)})
     messages.append({'role':'user','content':content})
     try:answer=llm(p,messages)
