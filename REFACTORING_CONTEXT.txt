@@ -1,0 +1,1807 @@
+inhCHAT / inhChatWorkLLM
+ТЕХНИЧЕСКИЙ КОНТЕКСТ ДЛЯ ОТДЕЛЬНОЙ ИТЕРАЦИИ РЕФАКТОРИНГА
+======================================================================
+
+Назначение этого файла
+----------------------
+Этот файл предназначен для следующей итерации разработки. Он описывает текущее
+состояние проекта, архитектуру, зависимости, уже реализованные функции,
+известные проблемы, технический долг, опасные места и порядок безопасного
+рефакторинга.
+
+ВАЖНО: это технический аудит и передача контекста, а не раскрытие внутренней
+цепочки рассуждений модели. Здесь зафиксированы наблюдаемые факты кода,
+выводы из структуры проекта и практические рекомендации.
+
+Дата аудита: 2026-09-18
+Репозиторий: https://github.com/tranzistrina/inhChatWorkLLM
+Текущий main: 90157d57edbc7a144d4a3cdc7ab7f1679101e54c
+Родитель: b1edf0c751c1115757494f741c2d1d4652abf8db
+
+КРИТИЧЕСКОЕ ПРАВИЛО ПО API ПРОВАЙДЕРОВ
+---------------------------------------
+Система provider/API уже несколько раз ломалась в предыдущих итерациях.
+Были проблемы с POST /api/providers, редактированием существующих API и
+добавлением API под другим именем. Из-за этого изменения provider/API были
+откачены к рабочему состоянию.
+
+Текущий main намеренно содержит provider API в откатанном состоянии.
+НЕ МЕНЯТЬ ПОВЕДЕНИЕ provider/API в рамках обычного рефакторинга.
+
+К provider/API относятся как минимум:
+- GET /api/providers
+- GET /api/providers/<pid>/models
+- POST /api/model-discovery
+- POST /api/providers
+- PATCH /api/providers/<pid>
+- DELETE /api/providers/<pid>
+- функции provider(), providers(), provider_models(), model_discovery(),
+  add_provider(), edit_provider(), del_provider()
+- UI providerForm, discoverModels(), syncProviderMode(), editProvider(),
+  renderProviders(), loadProviders()
+
+Если при рефакторинге эти части перемещаются по файлам, внешний контракт,
+HTTP-методы, поля JSON, коды ошибок и рабочий сценарий нужно сохранить.
+Любое изменение поведения provider/API считать отдельной задачей и сначала
+зафиксировать тестами.
+
+1. ЧТО ПРЕДСТАВЛЯЕТ СОБОЙ ПРОЕКТ
+--------------------------------
+inhCHAT это локальный веб-клиент для LLM.
+
+Основная схема:
+
+Browser
+  -> static/index.html
+  -> static/app.js
+  -> HTTP
+  -> Flask
+  -> SQLite / файловое хранилище
+  -> OpenAI-compatible provider
+  -> при необходимости FreeDeepseekAPI на 127.0.0.1:9655
+
+Основной сервер реально запускается через:
+  run_server.py
+    -> import server
+    -> import work_routes
+    -> import work_recovery
+    -> подмена server.llm на resilient_llm
+    -> Flask app.run()
+
+Главный backend:
+  server.py
+
+Work Mode:
+  workmode.py
+  work_routes.py
+  work_recovery.py
+  llm_retry.py
+
+Frontend:
+  static/index.html
+  static/app.js
+  static/style.css
+
+Старый/дублирующий backend:
+  app.py
+
+Инфраструктура запуска:
+  setup.sh
+  start.sh
+  requirements.txt
+
+2. ВАЖНЫЙ ФАКТ: app.py И server.py
+-----------------------------------
+В репозитории одновременно существуют app.py и server.py.
+
+server.py является актуальным backend, потому что run_server.py импортирует:
+  from server import app, llm as base_llm
+
+app.py содержит старую самостоятельную реализацию Flask-приложения и
+частично пересекающуюся бизнес-логику. Это один из главных источников
+архитектурного долга.
+
+README также местами описывает структуру через app.py, хотя фактически
+запускается server.py.
+
+Рекомендация:
+- сначала определить app.py как legacy/dead code;
+- проверить grep/import'ы и отсутствие реальных ссылок на него;
+- после подтверждения удалить app.py либо вынести его в отдельный legacy
+  документ/коммит;
+- не делать это одновременно с большим изменением server.py.
+
+Нельзя просто удалить app.py вслепую. Сначала проверить:
+  grep -R "from app|import app" .
+  grep -R "app.py" .
+и документацию/скрипты.
+
+3. BACKEND: server.py
+---------------------
+server.py сейчас одновременно отвечает за слишком много вещей:
+
+- создание директорий;
+- конфигурацию;
+- Flask app;
+- подключение SQLite;
+- создание/миграцию схемы;
+- users.json;
+- авторизацию;
+- provider lookup;
+- LLM HTTP adapter;
+- meta-analysis context;
+- shared library context;
+- обычные чаты;
+- временные чаты;
+- архивирование;
+- загрузку файлов;
+- DeepSeek endpoints;
+- отдачу статических файлов.
+
+Это сильное нарушение separation of concerns.
+
+Ключевые глобальные пути:
+ROOT = каталог проекта
+DATA = ROOT/data
+WORK = ROOT/workspace
+UPLOADS = WORK/uploads
+LIBRARY = WORK/library
+DB = DATA/inhchat.db
+USERS = ROOT/users.json
+
+MAX_CONTENT_LENGTH = 32 MB.
+
+Основной LLM adapter:
+llm(provider, messages)
+
+Он делает:
+POST <base_url>/chat/completions
+headers:
+  Content-Type: application/json
+  Authorization: Bearer <api_key>, если ключ есть
+body:
+  model
+  messages
+  temperature=0.3
+timeout=300
+
+run_server.py оборачивает эту функцию в with_retries(... attempts=3).
+
+4. БАЗА ДАННЫХ
+--------------
+SQLite:
+data/inhchat.db
+
+Таблицы:
+
+users:
+- id
+- email
+- password_hash
+- created_at
+
+providers:
+- id
+- user_id
+- name
+- base_url
+- api_key
+- model
+- kind
+- created_at
+- UNIQUE(user_id, name)
+
+chats:
+- id TEXT PRIMARY KEY
+- user_id
+- title
+- messages TEXT
+- provider_id
+- archived
+- meta_analysis
+- temporary
+- created_at
+- updated_at
+
+work_runs:
+- id
+- user_id
+- chat_id
+- request
+- source_files
+- plan
+- results
+- final_answer
+- created_at
+- iteration
+
+work_events:
+- id INTEGER PRIMARY KEY AUTOINCREMENT
+- run_id
+- chat_id
+- user_id
+- kind
+- message
+- data
+- created_at
+
+Проблемы:
+1. JSON хранится прямо в SQLite TEXT:
+   chats.messages
+   work_runs.source_files
+   work_runs.plan
+   work_runs.results
+
+2. Нет нормальной миграционной системы. Схема создаётся прямо при импорте
+   server.py/work_routes.py, а недостающие поля добавляются через ALTER TABLE.
+
+3. work_events создаётся из work_routes.py, а не централизованно.
+
+4. Нет FOREIGN KEY/CASCADE на уровне SQLite. Удаление связанных записей
+   делается вручную.
+
+5. SQLite connections создаются функцией db() без явной настройки:
+   - timeout;
+   - WAL;
+   - foreign_keys;
+   - busy_timeout.
+
+При параллельных запросах Work Mode это может стать проблемой.
+
+6. save_chat в server.py и save_chat в work_routes.py дублируют друг друга.
+
+7. work_runs привязан к chat_id, но выбор активного run делается через:
+   ORDER BY created_at DESC LIMIT 1.
+   При параллельных запусках это потенциально неоднозначно.
+
+Рекомендация:
+создать отдельный db.py/database.py с:
+- get_connection()
+- transaction helper
+- migrations
+- repository functions
+- единым включением PRAGMA foreign_keys=ON
+- WAL/busy timeout, если это подтверждено тестами как безопасное для
+  текущего сценария.
+
+Не переписывать схему сразу. Сначала покрыть текущие сценарии тестами.
+
+8. USERS И AUTH
+---------------
+users.json является источником истины для списка пользователей.
+
+При старте:
+- users() читает users.json;
+- sync() хэширует пароль через PBKDF2 SHA-256 600000;
+- затем создаёт/обновляет запись в SQLite.
+
+Это работает, но архитектурно странно:
+- пароль хранится в открытом виде в users.json;
+- при каждом запуске хэш создаётся заново;
+- SQLite становится производным хранилищем пользователей.
+
+auth decorator:
+- проверяет session['uid'];
+- снова читает users.json;
+- проверяет существование пользователя в SQLite;
+- проверяет, что email присутствует в активном users.json.
+
+Плюс:
+удаление пользователя из users.json инвалидирует его дальнейшие защищённые
+запросы.
+
+Минусы:
+- чтение users.json на каждый auth request;
+- смешение конфигурации пользователей и БД;
+- секрет сессии имеет небезопасный fallback:
+  change-me-in-.env
+
+Для локального приложения это приемлемее, чем для публичного сервера, но
+при рефакторинге нужно явно сохранить границу: проект рассчитан на локальный
+Mac, а не на публичный production deployment.
+
+9. PROVIDER/API
+---------------
+Provider хранится в SQLite.
+
+Текущий UI поддерживает:
+- список API;
+- выбор;
+- изменение;
+- удаление;
+- ручной ввод модели;
+- автоматическое получение моделей через GET /models.
+
+Особенность редактирования:
+editProvider() очищает поле API key в UI.
+PATCH endpoint при пустом api_key сохраняет старый ключ:
+  key = d.get('api_key') or (old['api_key'] if old else '')
+
+Это намеренное поведение, его не ломать.
+
+model discovery:
+POST /api/model-discovery
+получает base_url и api_key
+делает GET base_url.rstrip('/') + '/models'
+
+provider_models:
+GET /api/providers/<pid>/models
+делает аналогичный GET.
+
+Потенциальные улучшения только после тестов:
+- единый OpenAICompatibleClient;
+- URL normalization;
+- понятная модель ошибок;
+- валидация endpoint;
+- таймауты и retries.
+Но сначала зафиксировать текущий контракт.
+
+10. ОБЫЧНЫЕ ЧАТЫ
+----------------
+Обычный запрос:
+POST /api/chats/<cid>/message
+
+Поток:
+1. Проверяется chat.
+2. Берётся provider_id из формы или из chat.provider_id.
+3. Проверяется provider принадлежностью текущему user_id.
+4. При наличии файлов вызывается ingest_uploads().
+5. Загружается последние 20 user/assistant сообщений.
+6. Формируется system prompt.
+7. Добавляется shared library context.
+8. Если meta_analysis включён, добавляется контекст других чатов.
+9. Добавляются source files.
+10. Добавляется user content.
+11. вызывается llm().
+12. результат записывается в chats.messages.
+
+Проблема контекста:
+обычный чат имеет жёсткий срез history[-20].
+При длинных сообщениях фактический prompt может стать очень большим.
+
+Проблема архитектуры:
+формирование prompt происходит прямо внутри route.
+
+Рекомендация:
+выделить:
+- ChatRepository
+- ContextBuilder
+- LLMClient
+- ChatService
+
+Но внешний endpoint оставить прежним.
+
+11. META-ANALYSIS
+-----------------
+Идея:
+обычный чат изолирован.
+При включении toggle meta_analysis разрешается использовать контекст других
+не-временных чатов текущего пользователя.
+
+server.py:
+meta_chat_context(current_cid)
+
+work_routes.py:
+meta_chat_context()
+
+Контекст:
+- до 20 других чатов;
+- последние 6 сообщений каждого;
+- максимум 12000 символов на чат;
+- общий максимум 250000.
+
+Это хорошая базовая модель изоляции, но реализация дублируется.
+
+Рекомендация:
+одна функция/сервис:
+build_cross_chat_context(user_id, current_chat_id)
+
+Нельзя сделать meta-analysis глобально включённым по умолчанию.
+Переключатель является частью продукта.
+
+12. ВРЕМЕННЫЕ ЧАТЫ
+------------------
+temporary хранится как INTEGER.
+
+При старте UI после авторизации:
+POST /api/chats/cleanup-temporary
+
+Также createChat() удаляет текущий чат, если temporaryChat=true.
+
+openChat() удаляет предыдущий чат при переключении, если он временный.
+
+Это было добавлено отдельными коммитами:
+57bf705 Clean temporary chats from previous sessions
+b1edf0c Remove stale temporary chats on startup
+
+Не удалять эту логику при рефакторинге.
+
+Проблема:
+удаление чата должно синхронно удалять:
+- chats row
+- work_events
+- work_runs
+- workspace/chats/<cid>
+- workspace/uploads/<cid>
+
+Сейчас это реализовано вручную в нескольких местах.
+
+Рекомендация:
+централизовать delete_chat_resources(cid, user_id), но сначала написать
+регрессионные тесты.
+
+13. SHARED LIBRARY
+------------------
+Общая библиотека:
+workspace/library/<user_id>/
+
+Файлы доступны всем чатам одного аккаунта.
+
+server.py:
+- GET /api/library
+- POST /api/library
+- DELETE /api/library/<path>
+- GET /api/library/file/<path>
+
+Контекст для LLM:
+library_text()
+
+work_routes.py имеет собственную:
+shared_library_context()
+
+Это дублирование.
+
+Ограничение контекста:
+server.py library_text() -> 800000 символов.
+work_routes.py shared_library_context() -> 800000.
+
+Проблемы:
+- при загрузке файл сохраняется по basename;
+- два файла с одинаковым именем перезаписывают друг друга;
+- библиотека не имеет каталогов через UI;
+- нет checksum/versioning;
+- все текстовые файлы перечитываются при каждом запросе;
+- бинарные файлы хранятся, но в LLM context не попадают.
+
+Рефакторинг:
+LibraryService + FileStorage abstraction.
+
+Не менять публичный URL API без необходимости.
+
+14. WORK MODE: ИДЕЯ
+-------------------
+Work Mode превращает один пользовательский запрос в:
+
+INTAKE
+  -> PLAN
+  -> TASK 1
+  -> TASK 2
+  -> ...
+  -> FINAL
+
+Каждый Work run имеет iteration.
+
+Структура:
+workspace/chats/<chat_id>/iterations/<N>/
+
+Итерации позволяют:
+- хранить отдельные результаты;
+- читать предыдущие итерации;
+- копировать файлы из старой итерации;
+- выбирать вложения из старой итерации;
+- повторно продолжать незавершённую работу.
+
+Это одна из главных продуктовых идей проекта.
+
+15. workmode.py
+---------------
+Основные константы:
+TEXT_EXT
+MAX_UPLOAD = 24 MB
+MAX_FILES = 200
+MAX_FILE_TEXT = 150000
+MAX_CONTEXT = 2000000
+MAX_ARCHIVE_FILES = 200
+MAX_ARCHIVE_SIZE = 64 MB
+
+safe_child(root, rel):
+защищает от выхода за root через resolve().
+
+text_from(path):
+читает только поддерживаемые текстовые расширения;
+берёт до MAX_FILE_TEXT*4 байт;
+не обрабатывает первые 4096 байт с NUL как текст;
+decode utf-8 errors=replace;
+обрезает до MAX_FILE_TEXT.
+
+ingest_uploads():
+- сохраняет upload;
+- для ZIP распаковывает;
+- ограничивает число файлов;
+- ограничивает размер текстовых элементов;
+- извлекает текст.
+
+parse_plan():
+- пытается найти JSON array в ответе LLM;
+- fallback: разбивает строки ответа на задачи;
+- максимум 12 задач.
+
+create_archive():
+- проверяет пути;
+- максимум 200 файлов;
+- максимум 64 MB исходных файлов;
+- ZIP_DEFLATED.
+
+Риск:
+parse_plan() слишком permissive. Он принимает fallback почти любой текст как
+план. Для стабильного Work Mode лучше перейти к строгой JSON schema/валидатору,
+но только в отдельной задаче после фиксации текущего поведения.
+
+16. work_routes.py
+------------------
+Это главный Work Mode route/service модуль.
+
+Он содержит:
+- chat workspace path management;
+- iterations;
+- event logging;
+- source context;
+- directive parser;
+- artifact materialization;
+- intake;
+- plan;
+- task;
+- final;
+- continue;
+- workspace downloads;
+- DeepSeek auth/status.
+
+Это снова слишком много ответственности в одном файле.
+
+Особенно важные функции:
+chat_root()
+iteration_root()
+safe_file()
+emit()
+run_row()
+all_chat_files()
+readable_source()
+context_for_task()
+artifact_info()
+save_chat()
+parse_directives()
+materialize_task()
+
+17. WORK MODE DIRECTIVES
+------------------------
+LLM может выдавать специальные инструкции:
+
+FILE:
+path
+<full content>
+
+COPY_FROM:
+iterations/N/path => destination/path
+
+ARCHIVE:
+name.zip
+FILES:
+path1, path2
+
+GITHUB:
+https://github.com/owner/repo => repo_name
+
+[[ATTACH: path]]
+
+Эти directives являются фактически внутренним protocol между LLM и backend.
+
+Это очень важная часть архитектуры.
+
+Нельзя при рефакторинге заменить их случайно обычным Markdown parsing.
+Лучше рассматривать их как protocol layer.
+
+Рекомендация:
+в будущем сделать отдельный module:
+work_protocol.py
+
+с typed representation:
+FileArtifact
+CopyOperation
+ArchiveRequest
+GitHubCloneRequest
+AttachmentRequest
+
+Но текущие regex и поведение нужно сначала покрыть тестами.
+
+18. MATERIALIZE_TASK
+--------------------
+materialize_task() реально изменяет файловую систему по ответу модели.
+
+Он:
+- создаёт FILE;
+- clone public GitHub;
+- копирует COPY_FROM;
+- создаёт ARCHIVE.
+
+Важный принцип безопасности:
+все пути проходят safe_file/safe_child.
+
+GitHub разрешён только:
+https://github.com/...
+
+и clone:
+git clone --depth 1
+
+Проблемы:
+- ошибки materialization часто silently swallowed;
+- LLM может выдать некорректный directive и пользователь не увидит точную
+  причину;
+- GitHub clone может занимать до 180 секунд;
+- нет cancellation;
+- нет ограничения общего размера клонированного репозитория;
+- clone запускается subprocess;
+- нет проверки содержимого после clone;
+- директория может уже существовать;
+- отсутствует явная модель состояния операции.
+
+Рефакторинг:
+отдельный ArtifactService/WorkspaceService и явный результат:
+  created / skipped / failed + reason.
+
+Но не менять протокол без тестов.
+
+19. WORK RUN И ИТЕРАЦИИ
+-----------------------
+При intake:
+iteration = MAX(iteration) + 1 для chat.
+
+Создаётся work_run.
+
+В source_files сохраняется список извлечённых текстовых источников.
+
+Проблема:
+MAX(iteration)+1 не защищён от гонки при двух одновременных intake.
+
+Решение позже:
+- transaction/unique constraint;
+- либо отдельный sequence;
+- либо UUID run + sequence only for display.
+
+Не делать naive fix.
+
+20. WORK PLAN
+-------------
+POST /api/work/plan/<cid>
+
+Планировочный LLM получает:
+- original request;
+- shared library;
+- cross-chat context, если meta_analysis;
+- current + previous iteration files.
+
+Затем parse_plan().
+
+КРИТИЧЕСКАЯ ПРОБЛЕМА:
+work_runs не содержит meta_analysis.
+
+В plan():
+meta = bool(r['meta_analysis']) if 'meta_analysis' in r.keys() else False
+
+В task() и final() используется та же проверка.
+
+Поскольку meta_analysis находится в chats, а не work_runs, условие фактически
+не получает настройку из chat и обычно даёт False.
+
+Следовательно, UI toggle meta-analysis и Work Mode сейчас логически не
+связаны корректно.
+
+Это надо исправить отдельной функциональной задачей, не маскировать во время
+рефакторинга.
+
+Правильная архитектурная модель:
+при старте run зафиксировать snapshot настроек чата:
+- provider_id;
+- meta_analysis;
+- возможно model/config.
+
+Тогда run воспроизводим, даже если пользователь потом переключит настройки.
+
+21. WORK TASK
+-------------
+POST /api/work/task/<cid>
+
+Получает:
+- provider_id;
+- task index.
+
+Берёт latest run.
+
+Дальше:
+- tasks из JSON;
+- results из JSON;
+- source;
+- available files;
+- previous task results.
+
+LLM получает system instruction:
+execute ONLY assigned task.
+
+После ответа:
+materialize_task()
+results update
+task_done event
+
+Критическая проблема идемпотентности:
+результат задачи считается завершённым после одного запроса.
+Если frontend повторит POST из-за timeout/retry, задача может быть выполнена
+второй раз.
+
+Особенно опасно для:
+- FILE;
+- COPY_FROM;
+- ARCHIVE;
+- GITHUB clone.
+
+Нужен позже task-level idempotency key/state.
+
+Также run/results не имеют отдельной таблицы work_tasks.
+Сейчас индекс задачи хранится внутри JSON results.
+
+Для рефакторинга это один из основных кандидатов на нормализацию.
+
+22. WORK FINAL
+--------------
+POST /api/work/final/<cid>
+
+LLM получает:
+- request;
+- shared library;
+- meta context;
+- available files;
+- source files;
+- completed task results.
+
+LLM выбирает вложения через:
+[[ATTACH: path]]
+
+Backend валидирует пути через safe_file() и возвращает file cards.
+
+Это хорошая идея: финальная модель сама выбирает релевантные артефакты.
+
+Но final сейчас не проверяет, что ВСЕ плановые задачи выполнены.
+Это частично контролируется frontend/continue flow, но backend endpoint сам
+по себе может быть вызван раньше.
+
+Для надёжности final должен проверять run state на сервере.
+
+23. RECOVERY / CONTINUE
+-----------------------
+GET /api/work/continue/<cid>:
+- latest run;
+- plan;
+- results;
+- done indexes;
+- missing indexes;
+- can_finalize.
+
+POST /api/work/continue/<cid> фактически просто вызывает GET:
+def work_continue_post(cid):
+    return work_continue(cid)
+
+Это не настоящая state transition.
+
+Frontend:
+- после ошибки показывает кнопку Продолжить;
+- получает next_index;
+- выполняет оставшиеся задачи.
+
+Плюс:
+ранее завершённые задачи не запускаются заново.
+
+Минусы:
+- состояние inferred из results JSON;
+- нет explicit task status;
+- нет started_at/finished_at/error/retry_count;
+- нет lock;
+- latest run может быть не тем run при конкуренции.
+
+24. EVENT STREAM
+----------------
+work_events используется для UI polling.
+
+Frontend опрашивает:
+GET /api/work/status/<cid>?after=<lastEvent>
+
+Период:
+700 ms.
+
+Backend возвращает максимум 100 событий.
+
+Frontend хранит lastEvent только в памяти.
+
+Проблемы:
+- polling вместо SSE/WebSocket;
+- если вкладка была закрыта, состояние восстанавливается через continue,
+  но события могут быть потеряны;
+- run_status inferred from final_answer;
+- нет explicit event cursor semantics per client;
+- work_status выбирает latest run.
+
+Для локального приложения polling приемлем. Не переписывать на WebSocket без
+необходимости. Сначала улучшить state model.
+
+25. RETRY
+---------
+llm_retry.py содержит retry wrapper, который подключается только через
+run_server.py:
+
+server.llm = resilient_llm
+work_routes.llm = resilient_llm
+
+Это monkey patch.
+
+Проблема:
+поведение приложения зависит от точки входа. Если кто-то запускает server.py
+напрямую или импортирует app иначе, retry может отсутствовать.
+
+Рефакторинг:
+создать LLMClient/ResilientLLM, который сам является dependency.
+
+Не оставлять скрытый monkey patch как конечную архитектуру.
+
+26. run_server.py
+-----------------
+Сейчас это dependency injection через mutation:
+
+import server
+import work_routes
+import work_recovery
+
+server.llm = resilient_llm
+work_routes.llm = resilient_llm
+
+Это работает, но хрупко.
+
+Кроме того, work_routes imports llm from server:
+from server import ..., llm, ...
+
+После импорта name llm в work_routes является объектом функции, поэтому
+server.llm = resilient_llm отдельно подменяет server.llm, а
+work_routes.llm подменяется вручную.
+
+Это сильный сигнал, что нужен нормальный service dependency.
+
+27. work_recovery.py
+--------------------
+Файл небольшой и отвечает за восстановление Work Mode.
+
+Его нужно проверить отдельно при будущих изменениях, потому что recovery
+логика и continue endpoint частично дублируются.
+
+Не создавать вторую параллельную state machine.
+
+28. FRONTEND
+-----------
+static/index.html очень компактный и содержит всю основную разметку:
+- auth;
+- sidebar;
+- chat list;
+- provider selector;
+- mode buttons;
+- meta-analysis;
+- temporary;
+- theme;
+- work panel;
+- composer;
+- settings;
+- provider form;
+- DeepSeek;
+- library;
+- current chat files.
+
+static/app.js около 25 KB и практически является мини-приложением без
+framework.
+
+Глобальное состояние:
+current
+workMode
+metaAnalysis
+temporaryChat
+providers
+activeProvider
+workState
+pendingFiles
+pollTimer
+pollRunId
+lastEvent
+viewToken
+collapsed
+
+Это работает, но масштабируется плохо.
+
+Основная проблема:
+в одном файле смешаны:
+- API;
+- auth;
+- providers;
+- chats;
+- rendering;
+- Work Mode;
+- polling;
+- file handling;
+- settings;
+- theme;
+- Markdown parser.
+
+29. FRONTEND STATE
+------------------
+viewToken используется для защиты от устаревших async responses при
+переключении чата.
+
+Это хорошая и важная деталь.
+
+Пример:
+const token=++viewToken
+...
+if(token!==viewToken)return
+
+Не удалять без альтернативной защиты от race conditions.
+
+Проблемы:
+- нет центрального state store;
+- разные функции напрямую меняют DOM;
+- ошибки swallowed в некоторых местах;
+- activeProvider может остаться null после удаления;
+- Work Mode state частично backend, частично frontend.
+
+Рекомендация:
+не тащить React/Vue просто ради рефакторинга. Для текущего приложения
+можно сделать модули ES6:
+api.js
+state.js
+chat.js
+providers.js
+workmode.js
+files.js
+ui.js
+markdown.js
+
+Это даст большую часть выигрыша без тяжёлого frontend framework.
+
+30. FRONTEND: INLINE HANDLERS
+----------------------------
+Есть:
+onclick="useProvider(...)"
+onclick="editProvider(...)"
+onclick="openChat(...)"
+и window.useProvider/window.editProvider и т.д.
+
+Это усложняет тестирование и смешивает HTML/JS.
+
+Лучше перейти на event delegation/data-*:
+data-action="open-chat"
+data-chat-id="..."
+
+Но делать постепенно.
+
+31. MARKDOWN
+-----------
+formatText() вручную реализует часть Markdown:
+- headings;
+- blockquote;
+- ul;
+- bold;
+- inline code;
+- fenced code;
+- links;
+- paragraphs.
+
+Сначала выполняется esc(), поэтому базовый XSS риск снижен.
+
+Но parser хрупкий и не является полноценным Markdown parser.
+
+Не расширять parser бесконечно.
+Если dependency допустима, лучше использовать проверенную Markdown библиотеку
+с sanitization. Если проект должен оставаться без frontend dependencies,
+зафиксировать поддерживаемый subset тестами.
+
+32. CSS
+-------
+static/style.css около 22 KB.
+
+Есть:
+- light theme;
+- dark theme;
+- Work Mode;
+- settings;
+- providers;
+- library;
+- animations.
+
+Последний commit 90157d5 добавил только polished UI animations.
+Ничего кроме style.css этим commit не изменено.
+
+Не удалять animations во время backend/frontend refactoring.
+
+Есть @media (prefers-reduced-motion: reduce), это сохранять.
+
+33. ТЕКУЩАЯ ИСТОРИЯ GIT
+-----------------------
+Последние важные commits:
+
+90157d5
+Rollback to b1edf0c and add polished UI animations
+
+b1edf0c
+Remove stale temporary chats on startup
+
+57bf705
+Clean temporary chats from previous sessions
+
+8d5e832
+Apply chat isolation to Work Mode task and final context
+
+a1f8e76
+Preserve dark default and clean up temporary chats on switching
+
+e74dcbc
+Add switchable dark theme while retaining light theme
+
+Важный вывод:
+после rollback основной main намеренно возвращён к линии b1edf0c, а поверх
+добавлена только CSS-анимация.
+
+Не пытаться автоматически вернуть более поздние коммиты из старой ветки.
+Некоторые из них содержали проблемные provider изменения.
+
+34. ПРЕДЫДУЩАЯ КАТАСТРОФА С app.js
+------------------------------------
+В предыдущей истории commit 5eeb309... случайно заменил большую часть
+static/app.js и сломал страницу приложения.
+
+После этого app.js был восстановлен:
+c14789f79a5223f0c433b11a39d8beb56bea1f2c
+
+Практический вывод:
+frontend нельзя рефакторить большими blind replace/перегенерациями.
+Лучше маленькие commits и проверка после каждого изменения.
+
+35. GIT/LOCAL MAC ISSUE
+-----------------------
+Локально после force update main был divergence.
+
+Правильная синхронизация:
+git fetch origin
+git reset --hard origin/main
+
+После этого:
+HEAD = 90157d5
+origin/main = 90157d5
+
+Важно:
+git pull --ff-only теперь должен показывать Already up to date.
+
+36. start.sh
+------------
+Текущий start.sh:
+- активирует .venv;
+- проверяет FreeDeepseekAPI;
+- проверяет users.json;
+- запускает DeepSeek proxy, если есть deepseek-auth.json;
+- запускает python run_server.py;
+- cleanup через trap.
+
+В текущем Git tree start.sh имеет mode 100644, а не executable 100755.
+
+Поэтому на локальном Mac было:
+zsh: permission denied: ./start.sh
+
+Решение локально:
+chmod +x start.sh setup.sh
+
+Но chmod локально не гарантирует, что executable bit попадёт в GitHub.
+Если это надо исправлять в проекте, отдельной задачей сделать Git mode 100755
+для обоих shell scripts.
+
+README ожидает:
+chmod +x setup.sh start.sh
+поэтому документация уже компенсирует проблему.
+
+37. setup.sh
+------------
+setup.sh:
+- требует python3;
+- node;
+- npm;
+- создаёт venv;
+- pip install;
+- клонирует FreeDeepseekAPI в .vendor;
+- npm install;
+- создаёт .env;
+- создаёт users.json;
+- создаёт data/workspace;
+- выставляет chmod.
+
+Потенциальные проблемы:
+- setup.sh повторно выполняет pip install/npm install;
+- нет pinning lock для Python dependencies;
+- Node dependencies FreeDeepseekAPI живут внутри vendor clone;
+- git clone требует интернет;
+- повторный setup не полностью idempotent;
+- .env редактируется sed.
+
+Для рефакторинга deployment отдельно от application logic.
+
+38. README НЕ ПОЛНОСТЬЮ СООТВЕТСТВУЕТ КОДУ
+-------------------------------------------
+README описывает:
+- app.py как часть архитектуры;
+- структуру workspace упрощённо;
+- Work Mode;
+- provider API.
+
+Но фактически актуальный entrypoint server.py/run_server.py.
+
+README следует обновлять после архитектурного рефакторинга, а не до него.
+
+39. БЕЗОПАСНОСТЬ: PATH TRAVERSAL
+-------------------------------
+Есть хорошая базовая защита:
+safe_child()
+safe_file()
+resolve()
+проверка root in p.parents.
+
+Это сохранять.
+
+Но необходимо отдельно проверить:
+- zip path traversal;
+- symlink handling;
+- duplicate ZIP entries;
+- hard links/symlinks после Git clone;
+- archive output paths;
+- race between validation and file operation.
+
+Особенно нельзя считать ZIP безопасным только потому, что имя прошло
+safe_child(). Архивы являются отдельным trust boundary.
+
+40. БЕЗОПАСНОСТЬ: GITHUB
+------------------------
+GITHUB directive позволяет серверу выполнить:
+git clone --depth 1 <public repo>
+
+Ограничение netloc:
+github.com.
+
+Но это всё равно запуск внешнего процесса и сетевой доступ.
+
+Нужно в будущем:
+- отдельный timeout;
+- ограничение размера;
+- cancellation;
+- cleanup;
+- понятные ошибки;
+- возможно allowlist/setting;
+- не выполнять произвольные shell commands из LLM.
+
+Никогда не расширять directive до:
+SHELL:
+COMMAND:
+EXEC:
+без отдельной sandbox architecture.
+
+41. СЕКРЕТЫ
+-----------
+API keys хранятся в SQLite в открытом виде.
+
+Для локального personal-use это пока допустимая модель, но:
+- DB должна оставаться в .gitignore;
+- backups должны учитывать секреты;
+- API key нельзя отдавать frontend через GET /api/providers.
+
+Сейчас GET /api/providers возвращает name/base_url/model/kind, но не api_key.
+Это правильно.
+
+APP_SECRET_KEY fallback небезопасен для deployment.
+
+42. FILE UPLOADS
+---------------
+MAX_CONTENT_LENGTH = 32 MB.
+ingest_uploads отдельный лимит = 24 MB на файл.
+
+Это означает:
+- один файл максимум 24 MB;
+- общий HTTP request максимум 32 MB.
+
+MAX_FILES для ZIP = 200.
+
+Но число обычных multipart файлов отдельно не ограничено явным MAX_FILES.
+Это стоит добавить позже, если потребуется.
+
+43. КОНТЕКСТ LLM
+---------------
+Самая большая потенциальная производительность проблема проекта:
+контекст файлов формируется повторным чтением файлов с диска и склеиванием
+огромных строк на каждый LLM request.
+
+Work Mode может передавать до ~2 MB source context.
+Library до ~800k.
+Meta до ~250k.
+Плюс task results.
+
+Это может легко выйти за context window некоторых моделей.
+
+Нужна отдельная ContextBudget/ContextBuilder архитектура:
+- token/char budget;
+- приоритеты;
+- deduplication;
+- truncation policy;
+- file summaries;
+- selected files instead of everything.
+
+Не решать это простым увеличением лимитов.
+
+44. ИЗОЛЯЦИЯ ЧАТОВ
+------------------
+По умолчанию обычный chat history берётся только по chat_id.
+
+Work Mode task context:
+current iteration + previous iterations этого же chat.
+
+Cross-chat context должен появляться только при meta_analysis.
+
+Shared library является отдельным глобальным для аккаунта контекстом и
+доступна всем чатам.
+
+Это три разные области данных:
+
+A. Current chat:
+   обычная история + текущие файлы.
+
+B. Same-chat Work history:
+   iterations.
+
+C. Account-wide:
+   library.
+
+D. Other chats:
+   только meta_analysis.
+
+Не смешивать эти области в один generic context list без source type.
+
+45. ПРОБЛЕМА SNAPSHOT НАСТРОЕК
+------------------------------
+Work run сейчас не сохраняет provider/meta configuration как полноценный
+snapshot.
+
+Если пользователь изменит provider/meta toggle во время незавершённого run,
+часть запросов может работать с текущим frontend provider, а часть
+с сохранённым run context.
+
+Для воспроизводимости run должен иметь:
+- provider_id snapshot;
+- model snapshot;
+- base_url snapshot или provider version;
+- meta_analysis snapshot;
+- возможно system prompt version.
+
+Но provider/API нельзя ломать ради этого. Лучше добавить поля в work_runs
+или отдельную run_config таблицу.
+
+46. СОСТОЯНИЕ TASKS НУЖНО НОРМАЛИЗОВАТЬ
+---------------------------------------
+Сейчас:
+plan = JSON array
+results = JSON array
+
+Это удобно для MVP, но плохо для:
+- retries;
+- concurrency;
+- progress;
+- errors;
+- timing;
+- resume;
+- idempotency.
+
+Будущая схема может иметь:
+
+work_runs
+  id
+  chat_id
+  request
+  iteration
+  status
+  provider snapshot
+  config snapshot
+  created_at
+  updated_at
+
+work_tasks
+  id
+  run_id
+  index
+  title
+  description
+  status
+  result
+  error
+  attempts
+  started_at
+  finished_at
+
+work_artifacts
+  id
+  run_id
+  task_id
+  iteration
+  path
+  type
+  size
+  checksum
+
+Но это большой migration. Делать после тестов и поэтапно.
+
+47. STATUS MACHINE
+------------------
+Сейчас статус вычисляется косвенно.
+
+Предлагаемая явная state machine:
+
+RUN:
+created
+intaking
+planning
+executing
+finalizing
+completed
+failed
+cancelled
+
+TASK:
+pending
+running
+completed
+failed
+retrying
+skipped
+
+Это решит большую часть проблем continue/recovery.
+
+48. CONCURRENCY
+--------------
+Приложение локальное, но async browser actions всё равно могут создавать
+параллельные HTTP requests.
+
+Опасные места:
+- createChat;
+- temporary deletion;
+- intake iteration numbering;
+- latest run lookup;
+- task execution;
+- final;
+- provider deletion during running task;
+- switching chat while polling.
+
+Нужны server-side invariants, а не только frontend flags.
+
+49. ERROR HANDLING
+------------------
+Сейчас frontend api():
+- парсит JSON;
+- бросает Error(d.error || 'Ошибка запроса').
+
+Это удобно, но backend errors имеют разные формы:
+- error text;
+- 400;
+- 401;
+- 404;
+- 409;
+- 500;
+- 502;
+- 503.
+
+Для рефакторинга полезно стандартизировать:
+{
+  error: {
+    code: "...",
+    message: "...",
+    details: ...
+  }
+}
+
+Но это BREAKING API change.
+Поэтому не делать без отдельного migration plan.
+
+50. OBSERVABILITY
+-----------------
+Сейчас Work Mode имеет work_events, но обычные запросы почти не имеют
+структурированного logging.
+
+Нужны:
+- request id;
+- run id;
+- task id;
+- provider id;
+- duration;
+- status.
+
+Не логировать API keys и содержимое чувствительных credential файлов.
+
+51. ТЕСТЫ
+--------
+В репозитории не видно полноценного test suite.
+
+Это главный блокер безопасного рефакторинга.
+
+Минимальный тестовый слой:
+tests/
+  test_auth.py
+  test_chats.py
+  test_providers.py
+  test_work_protocol.py
+  test_workspace_security.py
+  test_work_runs.py
+  test_recovery.py
+
+Особенно обязательны provider regression tests.
+
+52. PROVIDER REGRESSION TEST MATRIX
+------------------------------------
+До изменения provider/API зафиксировать:
+
+1. POST с отсутствующим name -> 400.
+2. POST с отсутствующим base_url -> 400.
+3. POST с отсутствующим model -> 400.
+4. POST валидного provider -> 200.
+5. duplicate name для того же user -> 409.
+6. duplicate name для другого user -> должен быть разрешён.
+7. PATCH существующего provider -> 200.
+8. PATCH без api_key сохраняет старый key.
+9. PATCH duplicate name -> 409.
+10. DELETE -> 200.
+11. GET /api/providers не раскрывает api_key.
+12. GET models использует Authorization, если key есть.
+13. model-discovery работает для нового provider без записи в DB.
+14. чужой provider id недоступен.
+
+Эти тесты должны существовать до любого provider refactor.
+
+53. РЕФАКТОРИНГ: ПРАВИЛЬНЫЙ ПОРЯДОК
+-----------------------------------
+Этап 0. Заморозка поведения.
+- Зафиксировать main=90157d5.
+- Не трогать provider/API.
+- Добавить smoke tests.
+- Зафиксировать startup.
+
+Этап 1. Database layer.
+- вынести db();
+- централизовать migrations;
+- не менять API responses.
+
+Этап 2. Domain services.
+- ChatService;
+- ProviderService;
+- LibraryService;
+- WorkspaceService;
+- LLMClient.
+
+Routes должны стать тонкими.
+
+Этап 3. Work Mode state.
+- WorkRunService;
+- WorkTask state;
+- RecoveryService;
+- EventService.
+
+Не менять пользовательский workflow.
+
+Этап 4. Work protocol.
+- вынести directives;
+- typed parsing;
+- сохранить старый syntax.
+
+Этап 5. Context builder.
+- единая система current chat/library/meta/iterations;
+- budgets;
+- source labels.
+
+Этап 6. Frontend modules.
+- разделить app.js;
+- сохранить существующий DOM;
+- сохранить viewToken;
+- сохранить dark theme/animations.
+
+Этап 7. Dead code.
+- проверить app.py;
+- удалить только после grep/tests.
+
+Этап 8. Security hardening.
+- cookies;
+- secret validation;
+- ZIP;
+- GitHub clone;
+- upload collision policy.
+
+Этап 9. Documentation.
+- README обновить под реальную архитектуру.
+
+54. ЧТО НЕЛЬЗЯ ДЕЛАТЬ В ОДНОМ BIG-BANG COMMIT
+------------------------------------------------
+Не объединять одновременно:
+- переписывание server.py;
+- новую DB schema;
+- новый frontend framework;
+- новый provider client;
+- новую Work Mode state machine;
+- изменение API response format.
+
+Это делает невозможной диагностику регрессий.
+
+Лучше commits:
+1. tests baseline
+2. db extraction
+3. chat service extraction
+4. library/workspace extraction
+5. work service extraction
+6. frontend split
+7. cleanup
+8. docs
+
+55. КАК ПРОВЕРЯТЬ ПОСЛЕ КАЖДОГО ЭТАПА
+-------------------------------------
+Минимум:
+
+python -m py_compile server.py workmode.py work_routes.py work_recovery.py llm_retry.py run_server.py
+
+Запуск:
+./start.sh
+
+Проверить:
+- login;
+- новый чат;
+- обычный запрос;
+- смену provider;
+- add provider;
+- edit provider;
+- delete provider;
+- model discovery;
+- upload;
+- library;
+- meta-analysis;
+- temporary chat;
+- archive;
+- Work Mode;
+- task failure;
+- Continue;
+- final attachments;
+- GitHub clone;
+- ZIP archive;
+- dark/light theme.
+
+56. ПОВЕДЕНИЕ, КОТОРОЕ СЧИТАЕТСЯ РЕГРЕССИЕЙ
+--------------------------------------------
+Регрессия, если:
+- обычный чат начинает видеть другие чаты без meta toggle;
+- temporary chat остаётся после выхода/переключения;
+- Work Mode теряет предыдущие iterations;
+- completed tasks запускаются повторно без явной retry;
+- final attachment path перестаёт работать;
+- shared library перестаёт быть общей внутри аккаунта;
+- provider API ломает add/edit/delete/discovery;
+- API key начинает возвращаться frontend;
+- GitHub directive запускает не только github.com;
+- path traversal становится возможен;
+- старт на macOS требует sudo;
+- UI теряет dark theme;
+- UI теряет animation/reduced-motion support;
+- continue после сбоя запускает весь run заново.
+
+57. ИДЕАЛЬНАЯ ЦЕЛЕВАЯ АРХИТЕКТУРА
+---------------------------------
+Примерно:
+
+server.py
+  Flask app + route registration only
+
+config.py
+  env/config
+
+db.py
+  connection + migrations
+
+repositories/
+  users.py
+  providers.py
+  chats.py
+  work_runs.py
+  work_events.py
+
+services/
+  auth.py
+  llm.py
+  chat.py
+  library.py
+  workspace.py
+  work.py
+  recovery.py
+
+work/
+  protocol.py
+  planner.py
+  executor.py
+  finalizer.py
+  context.py
+  artifacts.py
+
+routes/
+  auth.py
+  providers.py
+  chats.py
+  library.py
+  work.py
+  deepseek.py
+
+static/
+  index.html
+  css/
+  js/
+    app.js
+    api.js
+    state.js
+    chats.js
+    providers.js
+    work.js
+    files.js
+    markdown.js
+    settings.js
+
+tests/
+  ...
+
+При этом не обязательно доходить до такой дробности. Главная цель:
+разделить HTTP, storage, domain logic, LLM integration и UI.
+
+58. ОСНОВНАЯ ТЕХНИЧЕСКАЯ ИДЕЯ ПРОЕКТА
+--------------------------------------
+Самая важная часть inhCHAT не обычный LLM chat. Это Work Mode как локальная
+agent-like orchestration система с файловым workspace.
+
+Её ключевые свойства:
+
+- один запрос пользователя превращается в plan;
+- plan разбивается на независимые задачи;
+- каждая задача получает контекст;
+- результаты сохраняются;
+- файлы являются first-class artifacts;
+- iterations сохраняют историю рабочих результатов;
+- предыдущие iterations доступны только внутри текущего chat;
+- shared library отдельно доступна всему аккаунту;
+- cross-chat context разрешается отдельным meta-analysis toggle;
+- после сбоя можно продолжить с первой незавершённой задачи;
+- final model выбирает, какие artifacts реально приложить.
+
+При рефакторинге именно эти инварианты должны считаться ядром продукта.
+
+59. КРИТИЧЕСКИЕ ПРОБЛЕМЫ В ПОРЯДКЕ ВАЖНОСТИ
+--------------------------------------------
+1. Отсутствие полноценного тестового набора.
+2. Provider/API исторически нестабилен, поэтому его нужно сначала заморозить
+   тестами.
+3. Work Mode state хранится частично в JSON и определяется косвенно.
+4. Нет task-level idempotency и явной state machine.
+5. run_row() выбирает latest run, что плохо для concurrency.
+6. Work run не имеет полноценного snapshot настроек.
+7. meta_analysis не переносится корректно в work_runs.
+8. server.py и work_routes.py перегружены ответственностями.
+9. app.py выглядит как legacy duplicate.
+10. app.js перегружен глобальным состоянием и UI/API logic.
+11. Context generation может создавать огромные prompts.
+12. SQLite setup/migrations распределены по модулям.
+13. File/ZIP/GitHub operations требуют дополнительного hardening.
+14. API keys хранятся plaintext в SQLite.
+15. start.sh/setup.sh не имеют executable bit в Git tree.
+16. README частично описывает старую архитектуру.
+
+60. ЧТО СЧИТАТЬ УСПЕШНЫМ РЕФАКТОРИНГОМ
+---------------------------------------
+Успех не означает "меньше строк".
+
+Успех означает:
+- те же пользовательские сценарии;
+- меньше скрытого глобального состояния;
+- routes почти не содержат бизнес-логику;
+- DB операции централизованы;
+- LLM adapter единый;
+- Work Mode имеет явное состояние;
+- task recovery детерминирован;
+- artifacts имеют нормальную модель;
+- context building централизован;
+- provider behavior покрыт тестами;
+- frontend разделён на модули;
+- startup/documentation совпадают с реальностью;
+- безопасность файловых операций не ухудшилась;
+- rollback отдельной части проекта остаётся возможным.
+
+61. ПРАВИЛО ДЛЯ СЛЕДУЮЩЕЙ ИТЕРАЦИИ
+----------------------------------
+Перед изменением любого кода:
+1. Прочитать этот файл.
+2. Проверить текущий commit.
+3. Посмотреть актуальные файлы, а не полагаться на этот документ как на
+   вечную истину.
+4. Сначала добавить/обновить regression tests.
+5. Делать небольшие commits.
+6. После каждого commit запускать smoke tests.
+7. Не менять provider/API, если пользователь не дал отдельное разрешение.
+8. Не возвращать старые коммиты только потому, что в них была нужная функция.
+9. Не делать blind replacement больших JS/Python файлов.
+10. Не менять product semantics во время чистого refactor.
+
+62. КРАТКАЯ КАРТА ФАЙЛОВ
+------------------------
+server.py
+  актуальный Flask backend, DB/auth/providers/chats/library/DeepSeek/обычный chat
+
+app.py
+  legacy/дублирующий Flask backend, проверить перед удалением
+
+run_server.py
+  entrypoint + retry dependency monkey patch
+
+llm_retry.py
+  retry wrapper
+
+workmode.py
+  upload parsing, text extraction, plan parsing, archive creation, path safety
+
+work_routes.py
+  Work Mode HTTP routes + workspace + directives + recovery endpoint
+
+work_recovery.py
+  recovery-related helpers
+
+static/index.html
+  вся HTML структура приложения
+
+static/app.js
+  весь frontend controller/state/API/rendering
+
+static/style.css
+  UI, themes, Work Mode, animations
+
+setup.sh
+  installation/bootstrap
+
+start.sh
+  runtime startup
+
+README.md
+  documentation, частично устаревшая относительно server.py
+
+requirements.txt
+  Flask, requests, python-dotenv, Werkzeug
+
+63. ФИНАЛЬНОЕ ПРЕДУПРЕЖДЕНИЕ
+----------------------------
+Главная опасность этого проекта сейчас не в количестве кода, а в том, что
+несколько разных подсистем уже работают, но их состояние распределено между
+SQLite, JSON, файловой системой, Flask session и JavaScript globals.
+
+Поэтому "рефакторинг" здесь должен означать постепенное наведение границ
+между подсистемами с сохранением поведения.
+
+Особенно:
+- provider/API не трогать без regression tests;
+- Work Mode не упрощать до обычного chat request;
+- iterations не превращать в одну общую папку;
+- meta-analysis не делать глобальным контекстом;
+- temporary не считать просто UI-флагом;
+- artifacts не считать обычным текстом ответа модели;
+- directives считать внутренним protocol;
+- frontend race protection viewToken сохранить;
+- path safety сохранить и усилить.
+
+Это состояние проекта на commit 90157d5. Любая следующая итерация должна
+сначала свериться с фактическим кодом, потому что этот файл является
+контекстом для рефакторинга, а не заменой исходникам.
