@@ -87,6 +87,19 @@ def provider_models(pid):
         return jsonify(models=models)
     except Exception as e:return jsonify(error=f'Не удалось получить модели: {e}'),502
 
+@app.post('/api/model-discovery')
+@auth
+def model_discovery():
+    import requests
+    d=request.json or {};base=str(d.get('base_url','')).strip();key=str(d.get('api_key',''))
+    if not base:return jsonify(error='Укажите Base URL'),400
+    try:
+        headers={'Authorization':'Bearer '+key} if key else {}
+        resp=requests.get(base.rstrip('/')+'/models',headers=headers,timeout=15);resp.raise_for_status()
+        data=resp.json();models=[x.get('id') for x in data.get('data',[]) if isinstance(x,dict) and x.get('id')]
+        return jsonify(models=models)
+    except Exception as e:return jsonify(error='Не удалось получить модели: '+str(e)),502
+
 @app.post('/api/providers')
 @auth
 def add_provider():
