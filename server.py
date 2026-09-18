@@ -96,3 +96,32 @@ def get_chat(cid):
 def save_chat(cid,items,title,pid):
  with db() as c:
   r=c.execute('SELECT * FROM chats WHERE id=? AND user_id=?',(cid,session['uid'])).fetchone();m=json.loads(r['messages']);m.extend(items);c.execute('UPDATE chats SET title=?,messages=?,provider_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?',(title,json.dumps(m,ensure_ascii=False),pid,cid))
+
+@app.post('/api/chats/<cid>/message')
+@auth
+def message(cid):
+    with db() as c:
+        chat=c.execute('SELECT * FROM chats WHERE id=? AND user_id=?',(cid,session['uid'])).fetchone()
+    if not chat:return jsonify(error='not_found'),404
+    content=request.form.get('content','').strip()
+    pid=request.form.get('provider_id') or chat['provider_id']
+    p=provider(int(pid)) if pid else None
+    if not content:return jsonify(error='Пустое сообщение'),400
+    if not p:return jsonify(error='Провайдер не выбран'),400
+    uploads=request.files.getlist('files')
+    source=[]
+    if uploads:
+        dest=UPLOADS/cid
+        try:source,_,_=ingest_uploads(uploads,dest)
+        except Exception as e:return jsonify(error=str(e)),400
+    history=json.loads(chat['messages'])
+    messages=[{'role':'system','content':'Ты полезный ассистент. Отвечай по существу и используй доступные материалы.'}]
+    messages += [{'role':m['role'],'content':m.get('content','')} for m in history[-20:] if m.get('role') in ('user','assistant')]
+    if source:messages.append({'role':'user','content':source_context(source)})
+    messages.append({'role':'user','content':content})
+    try:answer=llm(p,messages)
+    except Exception as e:return jsonify(error=f'LLM: {e}'),502
+    title=chat['title']
+    if title=='Новый чат':title=content[:48] or title
+    save_chat(cid,[{'role':'user','content':content},{'role':'assistant','content':answer}],title,int(pid))
+    return jsonify(answer=answer,title=title,files=[])
