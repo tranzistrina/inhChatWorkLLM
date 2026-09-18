@@ -51,14 +51,14 @@ def ingest_uploads(files, dest):
 def source_context(source):
     return '\n\n'.join(f'FILE: {x["path"]}\n{x["text"]}' for x in source)[:MAX_CONTEXT]
 
-def parse_plan(text):
+def parse_plan(text, max_tasks=12):
     m=re.search(r'\[[\s\S]*\]',text or '')
     if m:
         try:
             arr=json.loads(m.group(0))
-            if isinstance(arr,list): return [{'title':str(x.get('title',x.get('task','Задача'))),'description':str(x.get('description','')),'status':'pending'} for x in arr if isinstance(x,dict)][:12]
+            if isinstance(arr,list): return [{'title':str(x.get('title',x.get('task','Задача'))),'description':str(x.get('description','')),'status':'pending'} for x in arr if isinstance(x,dict)][:max(1,min(int(max_tasks or 12),30))
         except Exception: pass
-    return [{'title':line.strip(),'description':'Выполнить задачу и зафиксировать результат','status':'pending'} for line in (text or '').splitlines() if line.strip()][:12] or [{'title':'Выполнить запрос пользователя','description':'Подготовить результат','status':'pending'}]
+    return [{'title':line.strip(),'description':'Выполнить задачу и зафиксировать результат','status':'pending'} for line in (text or '').splitlines() if line.strip()][:max(1,min(int(max_tasks or 12),30))] or [{'title':'Выполнить запрос пользователя','description':'Подготовить результат','status':'pending'}]
 
 def create_archive(work_root, archive_rel, files):
     archive_rel=archive_rel.strip().replace('\\','/')
