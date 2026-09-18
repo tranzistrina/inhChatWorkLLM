@@ -59,6 +59,11 @@ def emit(rid,cid,kind,message,data=None):
 def run_row(cid):
     with db() as c:return c.execute('SELECT * FROM work_runs WHERE chat_id=? AND user_id=? ORDER BY created_at DESC LIMIT 1',(cid,session['uid'])).fetchone()
 
+def task_count(value,default):
+    try:n=int(str(value or '').strip())
+    except (TypeError,ValueError):n=default
+    return max(1,min(n,30))
+
 def all_chat_files(cid,upto=None):
     root=chat_root(cid)/'iterations';out=[]
     if not root.exists():return out
@@ -142,7 +147,7 @@ def materialize_task(cid,iteration,raw):
 @app.post('/api/work/intake/<cid>')
 @auth
 def intake(cid):
-    pid=int(request.form.get('provider_id') or 0);p=provider(pid);text=request.form.get('content','').strip();files=request.files.getlist('files');strict_formatting=request.form.get('strict_formatting','0').lower() in ('1','true','yes','on');allow_invention=request.form.get('allow_invention','0').lower() in ('1','true','yes','on');max_tasks=max(1,min(int(request.form.get('max_tasks') or 12),30));recommended_tasks=max(1,min(int(request.form.get('recommended_tasks') or 8),30))
+    pid=int(request.form.get('provider_id') or 0);p=provider(pid);text=request.form.get('content','').strip();files=request.files.getlist('files');strict_formatting=request.form.get('strict_formatting','0').lower() in ('1','true','yes','on');allow_invention=request.form.get('allow_invention','0').lower() in ('1','true','yes','on');max_tasks=task_count(request.form.get('max_tasks'),12);recommended_tasks=task_count(request.form.get('recommended_tasks'),8)
     if not p:return jsonify(error='Выберите провайдера'),400
     with db() as c:
         if not c.execute('SELECT id FROM chats WHERE id=? AND user_id=?',(cid,session['uid'])).fetchone():return jsonify(error='not_found'),404
