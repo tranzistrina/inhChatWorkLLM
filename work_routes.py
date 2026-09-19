@@ -6,6 +6,8 @@ from workmode import ingest_uploads, source_context, parse_plan, create_archive
 from report_builder import build_report_files, strict_system_prompt
 from media_service import generate_image, image_paths_under, multimodal_content
 from server import LIBRARY
+from work_state import transition, acquire_task, release_task
+from llm_execution import classify_error
 from work_ladder import init_db as init_ladder_db, get_settings as get_ladder_settings, save_settings as save_ladder_settings, provider_for_role as ladder_provider_for_role, route_tasks as ladder_route_tasks, choose_task_role as ladder_choose_role, execute_with_fallback as ladder_execute, provider_label as ladder_provider_label
 
 CHAT_ROOT = WORK / 'chats'; CHAT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -217,7 +219,7 @@ def intake(cid):
         uploaded_images=[x for x in dest.rglob('*') if x.is_file() and x.suffix.lower() in {'.png','.jpg','.jpeg','.webp','.gif'}]
         if uploaded_images and p['kind']!='multimodal' and not (ladder.get('enabled') and ladder.get('multimodal_provider_id')):raise ValueError('Для изображений настройте мультимодальную модель в лестнице или выберите мультимодальную модель вручную')
         source=[{'path':'iterations/'+str(n)+'/'+x['path'],'text':x['text']} for x in source]
-        with db() as c:c.execute('INSERT INTO work_runs(id,user_id,chat_id,request,source_files,plan,results,iteration,strict_formatting,allow_invention,max_tasks,recommended_tasks,ladder_settings) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',(rid,session['uid'],cid,text,json.dumps(source,ensure_ascii=False),'[]','[]',n,1 if strict_formatting else 0,1 if allow_invention else 0,max_tasks,recommended_tasks,json.dumps(ladder,ensure_ascii=False)))
+        with db() as c:c.execute('INSERT INTO work_runs(id,user_id,chat_id,request,source_files,plan,results,iteration,strict_formatting,allow_invention,max_tasks,recommended_tasks,ladder_settings,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(rid,session['uid'],cid,text,json.dumps(source,ensure_ascii=False),'[]','[]',n,1 if strict_formatting else 0,1 if allow_invention else 0,max_tasks,recommended_tasks,json.dumps(ladder,ensure_ascii=False),'CREATED'))
         emit(rid,cid,'intake','Материалы загружены',{'iteration':n,'files':count,'bytes':total})
         return jsonify(run_id=rid,iteration=n,files_count=count,bytes=total,source=[{'path':x['path'],'size':len(x['text'])} for x in source])
     except Exception as e:return jsonify(error=str(e)),400
@@ -238,6 +240,7 @@ def plan(cid):
     if not p or not r:return jsonify(error='Рабочая сессия или провайдер не найдены'),400
     src=json.loads(r['source_files']);meta=bool(r['meta_analysis']) if 'meta_analysis' in r.keys() else False;max_tasks=int(r['max_tasks']) if 'max_tasks' in r.keys() else 12;recommended_tasks=int(r['recommended_tasks']) if 'recommended_tasks' in r.keys() else 8;ladder=ladder_settings_for_run(r);emit(r['id'],cid,'plan_start','Составляю план задач')
     try:
+        transition(db,r['id'],session['uid'],'PLANNING',expected='CREATED')
         messages=[{'role':'system','content':f'Planning stage. Return ONLY a JSON array with 1-{max_tasks} sequential tasks. Prefer approximately {min(recommended_tasks,max_tasks)} tasks unless the source clearly requires fewer or the maximum limit makes that impossible. Each object has title and description. Do not execute anything.'},{'role':'user','content':r['request']+'\n\nSHARED LIBRARY:\n'+shared_library_context()+'\n\nCROSS-CHAT META ANALYSIS:\n'+(meta_chat_context() if meta else '(Выключен. Другие чаты недоступны.)')+'\n\nFILES:\n'+context_for_task(cid,r['iteration'],src)}]
         if ladder.get('enabled'):
             raw,meta_exec=ladder_call(ladder,'smart',messages)
@@ -255,6 +258,7 @@ def plan(cid):
             plan_text=raw
         else:
             raw=llm(p,messages);tasks=parse_plan(raw,max_tasks);plan_text=raw
+        transition(db,r['id'],session['uid'],'PLANNED')
         with db() as c:c.execute('UPDATE work_runs SET plan=?,results=? WHERE id=?',(json.dumps(tasks,ensure_ascii=False),'[]',r['id']))
         emit(r['id'],cid,'plan_done',f'План готов: {len(tasks)} задач',{'count':len(tasks),'ladder':bool(ladder.get('enabled'))});return jsonify(tasks=tasks,plan_text=plan_text)
     except Exception as e:emit(r['id'],cid,'error',str(e));return jsonify(error=str(e)),500
@@ -289,6 +293,8 @@ Create a ZIP with ARCHIVE: name.zip followed by FILES: path1, path2. FILES may r
 Clone a public GitHub repository with GITHUB: https://github.com/owner/repo => repo_name. Only github.com public repository URLs are allowed.
 If image generation is enabled for this chat, you may request an image with a line beginning GENERATE_IMAGE:. Everything after that marker must be the complete image-generation prompt written by you.
 Do not perform other tasks.'''.strip()},{'role':'user','content':multimodal_content(task_text,image_paths) if image_paths and p['kind']=='multimodal' else task_text}]
+    try: acquire_task(db,r['id'],session['uid'],idx)
+    except ValueError as e: return jsonify(error=str(e)),409
     emit(r['id'],cid,'task_start',f'Выполняю задачу {idx+1} из {len(tasks)}',{'index':idx,'tier':role,'model':ladder_provider_label(p)})
     try:
         if ladder.get('enabled'):
@@ -298,7 +304,11 @@ Do not perform other tasks.'''.strip()},{'role':'user','content':multimodal_cont
             raw=llm(p,prompt);exec_meta={'provider':ladder_provider_label(p),'attempts':1,'fallback_used':False,'errors':[]};actual=exec_meta['provider']
         made=materialize_task(cid,r['iteration'],raw)
     except Exception as e:
-        emit(r['id'],cid,'error',str(e),{'index':idx,'tier':role});return jsonify(error=str(e)),500
+        release_task(db,r['id'],session['uid'],idx)
+        try: transition(db,r['id'],session['uid'],'FAILED')
+        except Exception: pass
+        emit(r['id'],cid,'error',str(e),{'index':idx,'tier':role,'error_class':classify_error(e)});return jsonify(error=str(e)),500
+    release_task(db,r['id'],session['uid'],idx)
     results=[x for x in results if x['index']!=idx]
     results.append({'index':idx,'result':raw,'files':made,'tier':role,'model':actual,'fallback':exec_meta})
     with db() as c:c.execute('UPDATE work_runs SET results=? WHERE id=?',(json.dumps(sorted(results,key=lambda x:x['index']),ensure_ascii=False),r['id']))
@@ -346,7 +356,7 @@ def final(cid):
         except ValueError:continue
         if pth.is_file() and root in pth.parents:valid.append(str(pth.relative_to(root)))
     files=artifact_info(cid,valid);title=r['request'][:48] or 'Рабочая задача';save_chat(cid,[{'role':'user','content':r['request']},{'role':'assistant','content':answer,'files':files}],title,actual['id'])
-    with db() as c:c.execute('UPDATE work_runs SET final_answer=? WHERE id=?',(answer,r['id']))
+    with db() as c:c.execute("UPDATE work_runs SET final_answer=?,status='COMPLETED',updated_at=CURRENT_TIMESTAMP WHERE id=?",(answer,r['id']))
     emit(r['id'],cid,'final_done','Готово',{'attachments':len(files),'tier':role,'model':actual,'fallback_used':exec_meta.get('fallback_used',False),'attempts':exec_meta.get('attempts',1)})
     return jsonify(answer=answer,files=files,routing={'tier':role,'model':actual,'fallback':exec_meta})
 
