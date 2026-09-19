@@ -3,10 +3,11 @@ import server
 import work_routes
 import work_recovery
 import os
-from llm_retry import with_retries
+from llm_execution import execute
 
 def resilient_llm(provider, messages):
-    return with_retries(base_llm, provider, messages, attempts=3)
+    result,_meta=execute(base_llm,provider,messages,max_attempts=2)
+    return result
 
 server.llm = resilient_llm
 work_routes.llm = resilient_llm
