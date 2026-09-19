@@ -4,15 +4,15 @@ async function boot(){const m=await api('/api/me');if(!m.user){$('#auth').classL
 $('#authSubmit').onclick=async()=>{try{await api('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:$('#username').value,password:$('#password').value})});$('#authError').textContent='';$('#auth').classList.add('hidden');$('#app').classList.remove('hidden');await loadProviders();await loadChats();await refreshWorkspace()}catch(e){$('#authError').textContent=e.message}};
 async function loadProviders(preferredId=null){
  providers=await api('/api/providers');
- if(preferredId && providers.some(p=>p.id===preferredId)) activeProvider=preferredId;
- else if(activeProvider && providers.some(p=>p.id===activeProvider)){}
- else activeProvider=providers[0]?.id||null;
+ if(preferredId && providers.some(p=>p.id===preferredId && p.kind!=='image')) activeProvider=preferredId;
+ else if(activeProvider && providers.some(p=>p.id===activeProvider && p.kind!=='image)){}
+ else activeProvider=providers.find(p=>p.kind!=='image')?.id||null;
  renderProviders();renderProviderSelect();
 }
 function providerKindLabel(kind){return kind==='multimodal'?'Мультимодальная':kind==='image'?'Изображения':'Текстовая'}
 function renderProviders(){let h='';for(const p of providers){h+='<div class="provider-row"><div><strong>'+esc(p.name)+'</strong><span>'+esc(providerKindLabel(p.kind))+' · '+esc(p.model)+' · '+esc(p.base_url)+'</span></div><div><button class="ghost" onclick="useProvider('+p.id+')">'+(activeProvider===p.id?'Выбран':'Выбрать')+'</button><button class="ghost" onclick="editProvider('+p.id+')">Изменить</button><button class="icon-btn danger" onclick="delProvider('+p.id+')">×</button></div></div>'}$('#providers').innerHTML=h||'<div class="empty-note">Провайдеров пока нет.</div>'}
 function renderProviderSelect(){const s=$('#providerSelect');if(!s)return;const chatProviders=providers.filter(p=>p.kind!=='image');s.innerHTML=chatProviders.map(p=>`<option value="${p.id}" ${p.id===activeProvider?'selected':''}>${esc(p.name)} · ${esc(p.model)}</option>`).join('')}
-window.useProvider=id=>{activeProvider=id;renderProviders();renderProviderSelect()};
+window.useProvider=id=>{const p=providers.find(x=>x.id===id);if(!p||p.kind==='image')return;activeProvider=id;renderProviders();renderProviderSelect();updateImageControls()};
 window.delProvider=async id=>{try{await api('/api/providers/'+id,{method:'DELETE'});if(activeProvider===id)activeProvider=null;await loadProviders()}catch(e){alert(e.message)}};
 $('#providerSelect').onchange=e=>{activeProvider=Number(e.target.value);renderProviders();updateImageControls()};
 let editingProvider=null;
