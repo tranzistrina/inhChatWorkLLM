@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from workmode import ingest_uploads,source_context,parse_plan
 from provider_service import ProviderConfigError, auth_headers, candidate_base_urls, discover_models, normalize_base_url, endpoint
 from media_service import is_image_path, multimodal_content, generate_image
+from provider_capabilities import infer
 load_dotenv()
 ROOT=Path(__file__).resolve().parent;DATA=ROOT/'data';DATA.mkdir(exist_ok=True);WORK=ROOT/'workspace';WORK.mkdir(exist_ok=True);UPLOADS=WORK/'uploads';UPLOADS.mkdir(exist_ok=True);LIBRARY=WORK/'library';LIBRARY.mkdir(exist_ok=True);DB=DATA/'inhchat.db';USERS=ROOT/'users.json';PORT=int(os.getenv('PORT','6767'));DEEPSEEK=os.getenv('DEEPSEEK_BASE_URL','http://127.0.0.1:9655/v1')
 MAX_LIBRARY_CONTEXT_CHARS=int(os.getenv('MAX_LIBRARY_CONTEXT_CHARS','200000'))
@@ -172,8 +173,8 @@ def csrf_origin_guard():
 @app.get('/api/providers')
 @auth
 def providers():
- with db() as c:r=c.execute('SELECT id,name,base_url,model,kind FROM providers WHERE user_id=?',(session['uid'],)).fetchall()
- return jsonify([dict(x) for x in r])
+ with db() as c:r=c.execute('SELECT id,name,base_url,model,kind,capability_json FROM providers WHERE user_id=?',(session['uid'],)).fetchall()
+ return jsonify([{**dict(x), 'capabilities': infer(x['kind'],x['model']) if not x['capability_json'] else json.loads(x['capability_json'])} for x in r])
 
 
 @app.get('/api/providers/<int:pid>/models')
@@ -214,7 +215,7 @@ def add_provider():
  if kind not in {'text','multimodal','image'}:return jsonify(error='Неизвестный тип модели'),400
  if not name or not model:return jsonify(error='Заполните название, Base URL и модель'),400
  with db() as c:
-  try:r=c.execute('INSERT INTO providers(user_id,name,base_url,api_key,model,kind) VALUES(?,?,?,?,?,?)',(session['uid'],name,base,str(d.get('api_key','')).strip(),model,kind))
+  try:r=c.execute('INSERT INTO providers(user_id,name,base_url,api_key,model,kind,capability_json) VALUES(?,?,?,?,?,?,?)',(session['uid'],name,base,str(d.get('api_key','')).strip(),model,kind,json.dumps(d.get('capabilities') or infer(kind,model))))
   except sqlite3.IntegrityError:return jsonify(error='Провайдер с таким именем уже существует'),409
  return jsonify(id=r.lastrowid,name=name)
 
@@ -236,7 +237,7 @@ def edit_provider(pid):
         if not old:return jsonify(error='Провайдер не найден'),404
         key=str(d.get('api_key','')).strip() or old['api_key']
         try:
-            c.execute('UPDATE providers SET name=?,base_url=?,api_key=?,model=?,kind=? WHERE id=? AND user_id=?',(name,base,key,model,kind,pid,session['uid']))
+            c.execute('UPDATE providers SET name=?,base_url=?,api_key=?,model=?,kind=?,capability_json=? WHERE id=? AND user_id=?',(name,base,key,model,kind,json.dumps(d.get('capabilities') or infer(kind,model)),pid,session['uid']))
         except sqlite3.IntegrityError:return jsonify(error='Провайдер с таким именем уже существует'),409
     return jsonify(ok=True)
 
