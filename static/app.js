@@ -5,7 +5,7 @@ $('#authSubmit').onclick=async()=>{try{await api('/api/auth/login',{method:'POST
 async function loadProviders(preferredId=null){
  providers=await api('/api/providers');
  if(preferredId && providers.some(p=>p.id===preferredId && p.kind!=='image')) activeProvider=preferredId;
- else if(activeProvider && providers.some(p=>p.id===activeProvider && p.kind!=='image)){}
+ else if(activeProvider && providers.some(p=>p.id===activeProvider && p.kind!=='image')){}
  else activeProvider=providers.find(p=>p.kind!=='image')?.id||null;
  renderProviders();renderProviderSelect();
 }
