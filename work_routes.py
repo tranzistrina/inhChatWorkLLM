@@ -34,7 +34,7 @@ def meta_chat_context():
             ms=json.loads(r['messages']);txt='\n'.join(str(m.get('content','')) for m in ms[-6:] if m.get('role') in ('user','assistant'))
             if txt:out.append('CHAT: '+r['title']+'\n'+txt[:12000])
         except Exception:pass
-    return '\n\n'.join(out)[:250000] if out else '(Другие чаты недоступны или пусты)'
+    return '\n\n'.join(out)[:100000] if out else '(Другие чаты недоступны или пусты)'
 
 def shared_library_context():
     root=(LIBRARY/str(session['uid'])).resolve();root.mkdir(parents=True,exist_ok=True);out=[]
@@ -42,7 +42,7 @@ def shared_library_context():
         if p.is_file() and p.suffix.lower() in TEXT_EXT:
             try:out.append({'path':'library/'+str(p.relative_to(root)),'text':p.read_text(encoding='utf-8',errors='replace')[:120000]})
             except OSError:pass
-    return source_context(out)[:800000] if out else '(Общая библиотека пуста)'
+    return source_context(out)[:200000] if out else '(Общая библиотека пуста)'
 
 def urlparse_path(url):
     u=urllib.parse.urlparse(url);parts=[x for x in u.path.strip('/').split('/') if x];return parts[1] if len(parts)>1 else 'github_repo'
@@ -98,7 +98,7 @@ def context_for_task(cid,iteration,current):
     merged=[];seen=set()
     for x in current+readable_source(cid,iteration-1):
         if x['path'] not in seen:merged.append(x);seen.add(x['path'])
-    return source_context(merged)[:2000000]
+    return source_context(merged)[:600000]
 
 def artifact_info(cid,paths):
     root=chat_root(cid);out=[]
