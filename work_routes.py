@@ -264,7 +264,10 @@ def plan(cid):
         transition(db,r['id'],session['uid'],'PLANNED')
         with db() as c:c.execute('UPDATE work_runs SET plan=?,results=? WHERE id=?',(json.dumps(tasks,ensure_ascii=False),'[]',r['id']))
         emit(r['id'],cid,'plan_done',f'План готов: {len(tasks)} задач',{'count':len(tasks),'ladder':bool(ladder.get('enabled'))});return jsonify(tasks=tasks,plan_text=plan_text)
-    except Exception as e:emit(r['id'],cid,'error',str(e));return jsonify(error=str(e)),500
+    except Exception as e:
+        try: transition(db,r['id'],session['uid'],'FAILED')
+        except Exception: pass
+        emit(r['id'],cid,'error',str(e));return jsonify(error=str(e)),500
 
 @app.post('/api/work/task/<cid>')
 @auth
@@ -312,6 +315,8 @@ Do not perform other tasks.'''.strip()},{'role':'user','content':multimodal_cont
         except Exception: pass
         emit(r['id'],cid,'error',str(e),{'index':idx,'tier':role,'error_class':classify_error(e)});return jsonify(error=str(e)),500
     release_task(db,r['id'],session['uid'],idx)
+    try: transition(db,r['id'],session['uid'],'PLANNED')
+    except Exception: pass
     results=[x for x in results if x['index']!=idx]
     results.append({'index':idx,'result':raw,'files':made,'tier':role,'model':actual,'fallback':exec_meta})
     with db() as c:c.execute('UPDATE work_runs SET results=? WHERE id=?',(json.dumps(sorted(results,key=lambda x:x['index']),ensure_ascii=False),r['id']))
