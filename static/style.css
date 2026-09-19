@@ -203,3 +203,14 @@ body.dark .settings-toggle small{color:#999}
 
 /* Multimodal and image generation */
 .image-file-card{display:flex;flex-direction:column;align-items:stretch;overflow:hidden;max-width:520px}.message-image{display:block;width:100%;max-height:420px;object-fit:contain;background:rgba(0,0,0,.04);border-radius:10px;margin-bottom:8px}.image-send{min-width:42px}.image-send:disabled{opacity:.45;cursor:not-allowed}#imageProviderSelect{max-width:210px}@media(max-width:1000px){#imageProviderSelect{max-width:150px}}
+
+/* Work Mode model ladder */
+#workLadderBox.disabled{opacity:.55}
+.ladder-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(220px,1fr);gap:12px;align-items:center;margin:10px 0}
+.ladder-row small,.ladder-fallback small{display:block;color:var(--muted);margin-top:3px;line-height:1.35}
+.ladder-row select,.fallback-row select{width:100%}
+.ladder-fallback{margin-top:16px;padding-top:14px;border-top:1px solid var(--border)}
+.fallback-row{display:grid;grid-template-columns:28px 1fr 34px;gap:8px;align-items:center;margin:8px 0}
+.fallback-row button{height:34px}
+.ladder-actions{display:flex;gap:10px;align-items:center;margin-top:14px}
+@media(max-width:760px){.ladder-row{grid-template-columns:1fr}.fallback-row{grid-template-columns:24px 1fr 34px}}
