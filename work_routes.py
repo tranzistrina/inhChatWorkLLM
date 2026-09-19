@@ -1,4 +1,4 @@
-import json, re, shutil, uuid, zipfile, subprocess, urllib.parse
+import json, re, shutil, uuid, zipfile, subprocess, urllib.parse, os
 from pathlib import Path
 from flask import request, jsonify, send_file, session
 from server import app, db, auth, provider, llm, WORK, DEEPSEEK
@@ -9,6 +9,9 @@ from server import LIBRARY
 from work_ladder import init_db as init_ladder_db, get_settings as get_ladder_settings, save_settings as save_ladder_settings, provider_for_role as ladder_provider_for_role, route_tasks as ladder_route_tasks, choose_task_role as ladder_choose_role, execute_with_fallback as ladder_execute, provider_label as ladder_provider_label
 
 CHAT_ROOT = WORK / 'chats'; CHAT_ROOT.mkdir(parents=True, exist_ok=True)
+MAX_GITHUB_CLONES_PER_RUN=int(os.getenv('MAX_GITHUB_CLONES_PER_RUN','2'))
+MAX_CLONE_BYTES=int(os.getenv('MAX_CLONE_BYTES',str(200*1024*1024)))
+MAX_WORK_FILES=int(os.getenv('MAX_WORK_FILES','500'))
 TEXT_EXT={'.txt','.md','.markdown','.rst','.py','.js','.ts','.tsx','.jsx','.json','.yaml','.yml','.toml','.ini','.cfg','.conf','.env','.log','.csv','.tsv','.html','.htm','.css','.scss','.xml','.sql','.sh','.bash','.zsh','.bat','.ps1','.java','.kt','.kts','.c','.h','.cpp','.hpp','.cs','.go','.rs','.rb','.php','.swift','.vue','.svelte','.tex'}
 
 with db() as c:
@@ -60,8 +63,11 @@ def safe_file(root,rel):
 def emit(rid,cid,kind,message,data=None):
     with db() as c:c.execute('INSERT INTO work_events(run_id,chat_id,user_id,kind,message,data) VALUES(?,?,?,?,?,?)',(rid,cid,session['uid'],kind,message,json.dumps(data or {},ensure_ascii=False)))
 
-def run_row(cid):
-    with db() as c:return c.execute('SELECT * FROM work_runs WHERE chat_id=? AND user_id=? ORDER BY created_at DESC LIMIT 1',(cid,session['uid'])).fetchone()
+def run_row(cid,run_id=None):
+    with db() as c:
+        if run_id:
+            return c.execute('SELECT * FROM work_runs WHERE id=? AND chat_id=? AND user_id=?',(str(run_id),cid,session['uid'])).fetchone()
+        return c.execute('SELECT * FROM work_runs WHERE chat_id=? AND user_id=? ORDER BY created_at DESC LIMIT 1',(cid,session['uid'])).fetchone()
 
 def task_count(value,default):
     try:n=int(str(value or '').strip())
@@ -127,6 +133,8 @@ def available_image_paths(cid,iteration):
 
 def materialize_task(cid,iteration,raw):
     root=chat_root(cid);current=iteration_root(cid,iteration);made=[]
+    if len(all_chat_files(cid,iteration)) >= MAX_WORK_FILES:
+        raise RuntimeError('Достигнут лимит файлов рабочего запуска')
     image_enabled,image_provider_id=chat_image_settings(cid)
     image_provider=provider(int(image_provider_id)) if image_provider_id else None
     for n,prompt in enumerate(re.findall(r'GENERATE_IMAGE:\s*([^\n]+)',raw or '',re.I),1):
@@ -142,8 +150,15 @@ def materialize_task(cid,iteration,raw):
             u=urllib.parse.urlparse(url);parts=[x for x in u.path.strip('/').split('/') if x]
             if u.netloc.lower()!='github.com' or len(parts)<2:continue
             repo_url='https://github.com/'+parts[0]+'/'+parts[1].removesuffix('.git')
+            existing_clones=sum(1 for p in current.iterdir() if p.is_dir() and (p/'.git').is_dir()) if current.exists() else 0
+            if existing_clones >= MAX_GITHUB_CLONES_PER_RUN:
+                raise RuntimeError('Достигнут лимит GitHub-клонирований для запуска')
             target=safe_file(current,dst);target.mkdir(parents=True,exist_ok=True)
-            subprocess.run(['git','clone','--depth','1',repo_url,str(target)],check=True,timeout=180,capture_output=True,text=True)
+            subprocess.run(['git','clone','--depth','1','--filter=blob:none','--no-tags',repo_url,str(target)],check=True,timeout=180,capture_output=True,text=True)
+            total_bytes=sum(p.stat().st_size for p in target.rglob('*') if p.is_file())
+            if total_bytes > MAX_CLONE_BYTES:
+                shutil.rmtree(target,ignore_errors=True)
+                raise RuntimeError('Клонированный репозиторий превышает лимит размера')
             made.append(str(target.relative_to(root)))
         except (ValueError,OSError,subprocess.SubprocessError):continue
     copies,_,archives=parse_directives(raw)
@@ -210,7 +225,7 @@ def intake(cid):
 @app.get('/api/work/status/<cid>')
 @auth
 def work_status(cid):
-    r=run_row(cid)
+    r=run_row(cid,request.args.get('run_id'))
     if not r:return jsonify(active=False,events=[])
     after=int(request.args.get('after',0))
     with db() as c:ev=c.execute('SELECT id,kind,message,data,created_at FROM work_events WHERE run_id=? AND id>? ORDER BY id LIMIT 100',(r['id'],after)).fetchall()
@@ -219,7 +234,7 @@ def work_status(cid):
 @app.post('/api/work/plan/<cid>')
 @auth
 def plan(cid):
-    d=request.json or {};p=provider(int(d.get('provider_id') or 0));r=run_row(cid)
+    d=request.json or {};p=provider(int(d.get('provider_id') or 0));r=run_row(cid,d.get('run_id'))
     if not p or not r:return jsonify(error='Рабочая сессия или провайдер не найдены'),400
     src=json.loads(r['source_files']);meta=bool(r['meta_analysis']) if 'meta_analysis' in r.keys() else False;max_tasks=int(r['max_tasks']) if 'max_tasks' in r.keys() else 12;recommended_tasks=int(r['recommended_tasks']) if 'recommended_tasks' in r.keys() else 8;ladder=ladder_settings_for_run(r);emit(r['id'],cid,'plan_start','Составляю план задач')
     try:
@@ -247,11 +262,14 @@ def plan(cid):
 @app.post('/api/work/task/<cid>')
 @auth
 def task(cid):
-    d=request.json or {};idx=int(d.get('index',-1));requested_provider=provider(int(d.get('provider_id') or 0));r=run_row(cid)
+    d=request.json or {};idx=int(d.get('index',-1));requested_provider=provider(int(d.get('provider_id') or 0));r=run_row(cid,d.get('run_id'))
     if not requested_provider or not r:return jsonify(error='Рабочая сессия или провайдер не найдены'),400
     tasks=json.loads(r['plan']);results=json.loads(r['results'])
     if idx<0 or idx>=len(tasks):return jsonify(error='Неверный номер задачи'),400
     src=json.loads(r['source_files']);previous='\n\n'.join(f'TASK {x["index"]+1}:\n{x["result"]}' for x in results);available='\n'.join('- '+x['path'] for x in all_chat_files(cid,r['iteration']))
+    existing=next((x for x in results if int(x.get('index',-1))==idx),None)
+    if existing:
+        return jsonify(result=existing.get('result',''),files=artifact_info(cid,existing.get('files',[])),routing={'tier':existing.get('tier'),'model':existing.get('model'),'fallback':existing.get('fallback',{}),'idempotent':True})
     image_enabled,image_provider_id=chat_image_settings(cid);ladder=ladder_settings_for_run(r)
     image_paths=available_image_paths(cid,r['iteration']) if image_enabled else []
     image_required=bool(image_paths)
@@ -290,7 +308,7 @@ Do not perform other tasks.'''.strip()},{'role':'user','content':multimodal_cont
 @app.post('/api/work/final/<cid>')
 @auth
 def final(cid):
-    d=request.json or {};requested_provider=provider(int(d.get('provider_id') or 0));r=run_row(cid)
+    d=request.json or {};requested_provider=provider(int(d.get('provider_id') or 0));r=run_row(cid,d.get('run_id'))
     if not requested_provider or not r:return jsonify(error='Рабочая сессия или провайдер не найдены'),400
     results=json.loads(r['results']);src=json.loads(r['source_files']);meta=bool(r['meta_analysis']) if 'meta_analysis' in r.keys() else False;work='\n\n'.join(f'TASK {x["index"]+1}:\n{x["result"]}' for x in results);available='\n'.join('- '+x['path'] for x in all_chat_files(cid,r['iteration']));final_image_enabled,final_image_provider_id=chat_image_settings(cid);ladder=ladder_settings_for_run(r);final_image_paths=available_image_paths(cid,r['iteration']) if final_image_enabled else []
     if ladder.get('enabled'):
@@ -368,7 +386,7 @@ def deepseek_status():
 @app.get('/api/work/continue/<cid>')
 @auth
 def work_continue(cid):
-    r=run_row(cid)
+    r=run_row(cid,request.args.get('run_id'))
     if not r:
         return jsonify(active=False,tasks=[],next_index=None,can_finalize=False)
     tasks=json.loads(r['plan'] or '[]')
