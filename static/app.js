@@ -14,7 +14,7 @@ function renderProviders(){let h='';for(const p of providers){h+='<div class="pr
 function renderProviderSelect(){const s=$('#providerSelect');if(!s)return;const chatProviders=providers.filter(p=>p.kind!=='image');s.innerHTML=chatProviders.map(p=>`<option value="${p.id}" ${p.id===activeProvider?'selected':''}>${esc(p.name)} · ${esc(p.model)}</option>`).join('')}
 window.useProvider=id=>{const p=providers.find(x=>x.id===id);if(!p||p.kind==='image')return;activeProvider=id;renderProviders();renderProviderSelect();updateImageControls()};
 window.delProvider=async id=>{try{await api('/api/providers/'+id,{method:'DELETE'});if(activeProvider===id)activeProvider=null;await loadProviders()}catch(e){alert(e.message)}};
-$('#providerSelect').onchange=e=>{activeProvider=Number(e.target.value);renderProviders();updateImageControls()};
+$('#providerSelect').onchange=async e=>{activeProvider=Number(e.target.value);renderProviders();updateImageControls();if(current)await api('/api/chats/'+current,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider_id:activeProvider})}).catch(()=>{})};
 let editingProvider=null;
 async function discoverModels(){
  const base=$('#pBase').value.trim(),key=$('#pKey').value;
@@ -39,7 +39,7 @@ function syncProviderMode(){
 $('#providerMode').onchange=syncProviderMode;
 $('#providerDiscover').onclick=async()=>{try{await discoverModels()}catch(e){alert(e.message)}};
 
-window.editProvider=async id=>{const p=providers.find(x=>x.id===id);if(!p)return;editingProvider=p;$('#pName').value=p.name;$('#pBase').value=p.base_url;$('#pModel').value=p.model;$('#pKey').value='';$('#providerKind').value=p.kind||'text';$('#providerMode').value='manual';syncProviderMode();$('#providerSubmit').textContent='Сохранить изменения'};
+window.editProvider=async id=>{const p=providers.find(x=>x.id===id);if(!p)return;editingProvider=p;$('#pName').value=p.name;$('#pBase').value=p.base_url;$('#pModel').value=p.model;$('#pKey').value='';$('#providerKind').value=p.kind==='multimodal'?'multimodal':p.kind==='image'?'image':'text';$('#providerMode').value='manual';syncProviderMode();$('#providerSubmit').textContent='Сохранить изменения'};
 $('#providerForm').onsubmit=async e=>{
  e.preventDefault();
  const submit=$('#providerSubmit');
