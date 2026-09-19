@@ -6,7 +6,7 @@ from work_routes import run_row
 @app.get('/api/work/continue/<cid>')
 @auth
 def continuation_state(cid):
-    r=run_row(cid)
+    r=run_row(cid,request.args.get('run_id'))
     if not r:return jsonify(error='Рабочая сессия не найдена'),404
     tasks=json.loads(r['plan'] or '[]');results=json.loads(r['results'] or '[]')
     done={int(x.get('index',-1)) for x in results}
@@ -16,7 +16,7 @@ def continuation_state(cid):
 @app.post('/api/work/continue/<cid>')
 @auth
 def continue_work(cid):
-    d=request.json or {};p=provider(int(d.get('provider_id') or 0));r=run_row(cid)
+    d=request.json or {};p=provider(int(d.get('provider_id') or 0));r=run_row(cid,d.get('run_id'))
     if not p or not r:return jsonify(error='Рабочая сессия или провайдер не найдены'),400
     tasks=json.loads(r['plan'] or '[]');results=json.loads(r['results'] or '[]');done={int(x.get('index',-1)) for x in results}
     requested=d.get('index');idx=int(requested) if requested is not None else next((i for i in range(len(tasks)) if i not in done),-1)
