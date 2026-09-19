@@ -2086,3 +2086,151 @@ python -m py_compile server.py provider_service.py workmode.py work_routes.py wo
 Fallback также срабатывает на пустой ответ модели, а не только на HTTP/transport
 исключение. Количество попыток ограничено длиной пользовательского fallback
 списка.
+
+
+
+======================================================================
+ПРОДОЛЖЕНИЕ: WORK ENGINE REFACTOR (2026-09-19)
+======================================================================
+
+Цель
+----
+Следующая итерация перевела Work Mode от набора route handlers к базовой
+архитектуре execution/state/policy.
+
+1. UNIFIED LLM EXECUTION
+------------------------
+Добавлен llm_execution.py.
+
+Он классифицирует ошибки:
+- AUTH;
+- RATE_LIMIT;
+- TIMEOUT;
+- CONTEXT_TOO_LONG;
+- INVALID_REQUEST;
+- SERVER_ERROR;
+- EMPTY_RESPONSE;
+- UNKNOWN.
+
+Execution policy ограничивает число повторов и не повторяет заведомо
+неисправимые AUTH/INVALID/CONTEXT ошибки.
+
+run_server.py теперь использует этот execution layer вместо отдельной
+трёхкратной retry-обёртки из llm_retry.py.
+
+2. WORK RUN STATE MACHINE
+-------------------------
+Добавлен work_state.py.
+
+Состояния:
+CREATED
+PLANNING
+PLANNED
+RUNNING_TASK
+FINALIZING
+COMPLETED
+FAILED
+CANCELLED
+
+Переходы валидируются сервером.
+
+work_runs получили:
+- status;
+- active_task_index;
+- updated_at.
+
+Задача захватывается через BEGIN IMMEDIATE и active_task_index.
+Это снижает риск параллельного выполнения одной и той же задачи.
+
+3. IDEMPOTENCY
+-------------
+Повторный task request для уже сохранённого индекса возвращает существующий
+результат и не вызывает LLM повторно.
+
+Frontend передает run_id в task/final/polling, а backend проверяет:
+run_id + chat_id + user_id.
+
+4. ACTION POLICY
+----------------
+Добавлен action_policy.py.
+
+LLM-generated directives сначала преобразуются в типизированные действия:
+- file;
+- copy;
+- archive;
+- github;
+- image.
+
+До выполнения проверяются:
+- относительность путей;
+- traversal;
+- размер FILE;
+- количество действий;
+- количество файлов архива;
+- HTTPS и host github.com;
+- корректность repository URL;
+- длина image prompt.
+
+Unknown actions не исполняются.
+
+Work Mode дополнительно имеет runtime limits:
+- MAX_GITHUB_CLONES_PER_RUN;
+- MAX_CLONE_BYTES;
+- MAX_WORK_FILES.
+
+5. PROVIDER CAPABILITIES
+------------------------
+Добавлен provider_capabilities.py.
+
+Профиль провайдера содержит:
+- vision;
+- reasoning;
+- coding;
+- tool_calling;
+- max_context;
+- max_output.
+
+В providers добавлено capability_json.
+
+Для обратной совместимости capabilities выводятся из kind/model, если
+явный профиль не сохранён.
+
+Model Ladder теперь учитывает требования задачи:
+- vision -> multimodal;
+- coding/reasoning -> smart;
+- остальные задачи используют назначенный tier.
+
+6. FALLBACK
+-----------
+work_ladder.execute_with_fallback() теперь сохраняет класс ошибки для каждой
+попытки.
+
+AUTH/INVALID/CONTEXT ошибки не маскируются как обычная пустая ошибка.
+Context overflow фиксируется отдельно и оставляет основу для дальнейшей
+capability-aware escalation.
+
+7. TESTS
+--------
+Добавлены:
+- tests/test_llm_execution.py
+- tests/test_action_policy.py
+- tests/test_work_state.py
+
+Они покрывают классификацию ошибок, retry policy, path traversal и базовые
+state transitions.
+
+ОБЯЗАТЕЛЬНАЯ ЛОКАЛЬНАЯ ПРОВЕРКА
+--------------------------------
+После pull:
+
+python -m unittest discover -s tests -v
+
+python -m py_compile   server.py provider_service.py workmode.py work_routes.py   work_recovery.py llm_retry.py llm_execution.py work_state.py   action_policy.py provider_capabilities.py run_server.py report_builder.py
+
+Следующий архитектурный этап:
+- выделить Work repository/service вместо хранения JSON в одном work_runs;
+- сделать отдельную таблицу work_tasks;
+- добавить per-user/run quotas;
+- перевести fallback на capability-compatible escalation;
+- убрать остаточную двойную retry архитектуру;
+- после проверки зависимостей определить, можно ли удалить legacy app.py.
