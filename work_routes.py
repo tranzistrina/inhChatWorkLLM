@@ -18,6 +18,7 @@ with db() as c:
     if 'allow_invention' not in cols: c.execute('ALTER TABLE work_runs ADD COLUMN allow_invention INTEGER DEFAULT 0')
     if 'max_tasks' not in cols: c.execute('ALTER TABLE work_runs ADD COLUMN max_tasks INTEGER DEFAULT 12')
     if 'recommended_tasks' not in cols: c.execute('ALTER TABLE work_runs ADD COLUMN recommended_tasks INTEGER DEFAULT 8')
+    if 'ladder_settings' not in cols: c.execute('ALTER TABLE work_runs ADD COLUMN ladder_settings TEXT DEFAULT \'{}\'
     c.execute('''CREATE TABLE IF NOT EXISTS work_events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL,chat_id TEXT NOT NULL,user_id INTEGER NOT NULL,kind TEXT NOT NULL,message TEXT NOT NULL,data TEXT DEFAULT '{}',created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 init_ladder_db(db)
 
@@ -176,7 +177,10 @@ def work_ladder_put():
     except ValueError as e:
         return jsonify(error=str(e)),400
 
-def ladder_settings_for_run():
+def ladder_settings_for_run(run=None):
+    if run is not None and 'ladder_settings' in run.keys():
+        try: return json.loads(run['ladder_settings'] or '{}')
+        except (TypeError,ValueError): pass
     return get_ladder_settings(db, session['uid'])
 
 def ladder_call(settings, role, messages, required_kind=None):
@@ -198,7 +202,7 @@ def intake(cid):
         uploaded_images=[x for x in dest.rglob('*') if x.is_file() and x.suffix.lower() in {'.png','.jpg','.jpeg','.webp','.gif'}]
         if uploaded_images and p['kind']!='multimodal' and not (ladder.get('enabled') and ladder.get('multimodal_provider_id')):raise ValueError('Для изображений настройте мультимодальную модель в лестнице или выберите мультимодальную модель вручную')
         source=[{'path':'iterations/'+str(n)+'/'+x['path'],'text':x['text']} for x in source]
-        with db() as c:c.execute('INSERT INTO work_runs(id,user_id,chat_id,request,source_files,plan,results,iteration,strict_formatting,allow_invention,max_tasks,recommended_tasks) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(rid,session['uid'],cid,text,json.dumps(source,ensure_ascii=False),'[]','[]',n,1 if strict_formatting else 0,1 if allow_invention else 0,max_tasks,recommended_tasks))
+        with db() as c:c.execute('INSERT INTO work_runs(id,user_id,chat_id,request,source_files,plan,results,iteration,strict_formatting,allow_invention,max_tasks,recommended_tasks,ladder_settings) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',(rid,session['uid'],cid,text,json.dumps(source,ensure_ascii=False),'[]','[]',n,1 if strict_formatting else 0,1 if allow_invention else 0,max_tasks,recommended_tasks,json.dumps(ladder,ensure_ascii=False)))
         emit(rid,cid,'intake','Материалы загружены',{'iteration':n,'files':count,'bytes':total})
         return jsonify(run_id=rid,iteration=n,files_count=count,bytes=total,source=[{'path':x['path'],'size':len(x['text'])} for x in source])
     except Exception as e:return jsonify(error=str(e)),400
@@ -217,7 +221,7 @@ def work_status(cid):
 def plan(cid):
     d=request.json or {};p=provider(int(d.get('provider_id') or 0));r=run_row(cid)
     if not p or not r:return jsonify(error='Рабочая сессия или провайдер не найдены'),400
-    src=json.loads(r['source_files']);meta=bool(r['meta_analysis']) if 'meta_analysis' in r.keys() else False;max_tasks=int(r['max_tasks']) if 'max_tasks' in r.keys() else 12;recommended_tasks=int(r['recommended_tasks']) if 'recommended_tasks' in r.keys() else 8;ladder=ladder_settings_for_run();emit(r['id'],cid,'plan_start','Составляю план задач')
+    src=json.loads(r['source_files']);meta=bool(r['meta_analysis']) if 'meta_analysis' in r.keys() else False;max_tasks=int(r['max_tasks']) if 'max_tasks' in r.keys() else 12;recommended_tasks=int(r['recommended_tasks']) if 'recommended_tasks' in r.keys() else 8;ladder=ladder_settings_for_run(r);emit(r['id'],cid,'plan_start','Составляю план задач')
     try:
         messages=[{'role':'system','content':f'Planning stage. Return ONLY a JSON array with 1-{max_tasks} sequential tasks. Prefer approximately {min(recommended_tasks,max_tasks)} tasks unless the source clearly requires fewer or the maximum limit makes that impossible. Each object has title and description. Do not execute anything.'},{'role':'user','content':r['request']+'\n\nSHARED LIBRARY:\n'+shared_library_context()+'\n\nCROSS-CHAT META ANALYSIS:\n'+(meta_chat_context() if meta else '(Выключен. Другие чаты недоступны.)')+'\n\nFILES:\n'+context_for_task(cid,r['iteration'],src)}]
         if ladder.get('enabled'):
@@ -248,7 +252,7 @@ def task(cid):
     tasks=json.loads(r['plan']);results=json.loads(r['results'])
     if idx<0 or idx>=len(tasks):return jsonify(error='Неверный номер задачи'),400
     src=json.loads(r['source_files']);previous='\n\n'.join(f'TASK {x["index"]+1}:\n{x["result"]}' for x in results);available='\n'.join('- '+x['path'] for x in all_chat_files(cid,r['iteration']))
-    image_enabled,image_provider_id=chat_image_settings(cid);ladder=ladder_settings_for_run()
+    image_enabled,image_provider_id=chat_image_settings(cid);ladder=ladder_settings_for_run(r)
     image_paths=available_image_paths(cid,r['iteration']) if image_enabled else []
     image_required=bool(image_paths)
     if ladder.get('enabled'):
@@ -288,7 +292,7 @@ Do not perform other tasks.'''.strip()},{'role':'user','content':multimodal_cont
 def final(cid):
     d=request.json or {};requested_provider=provider(int(d.get('provider_id') or 0));r=run_row(cid)
     if not requested_provider or not r:return jsonify(error='Рабочая сессия или провайдер не найдены'),400
-    results=json.loads(r['results']);src=json.loads(r['source_files']);meta=bool(r['meta_analysis']) if 'meta_analysis' in r.keys() else False;work='\n\n'.join(f'TASK {x["index"]+1}:\n{x["result"]}' for x in results);available='\n'.join('- '+x['path'] for x in all_chat_files(cid,r['iteration']));final_image_enabled,final_image_provider_id=chat_image_settings(cid);ladder=ladder_settings_for_run();final_image_paths=available_image_paths(cid,r['iteration']) if final_image_enabled else []
+    results=json.loads(r['results']);src=json.loads(r['source_files']);meta=bool(r['meta_analysis']) if 'meta_analysis' in r.keys() else False;work='\n\n'.join(f'TASK {x["index"]+1}:\n{x["result"]}' for x in results);available='\n'.join('- '+x['path'] for x in all_chat_files(cid,r['iteration']));final_image_enabled,final_image_provider_id=chat_image_settings(cid);ladder=ladder_settings_for_run(r);final_image_paths=available_image_paths(cid,r['iteration']) if final_image_enabled else []
     if ladder.get('enabled'):
         role='multimodal' if final_image_paths and ladder.get('multimodal_provider_id') else 'smart'
         p=ladder_provider_for_role(db,session['uid'],ladder,role) or requested_provider
