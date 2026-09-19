@@ -97,6 +97,6 @@ def execute_with_fallback(db,user_id,primary,fallback_ids,call,required_kind=Non
         if not required_kind and kind=="image": continue
         seen.add(int(row["id"]));candidates.append(row)
     for row in candidates:
-        try: return call(row),{"provider":provider_label(row),"attempts":len(errors)+1,"fallback_used":bool(errors),"errors":errors}
+        try:\n            result=call(row)\n            if result is None or (isinstance(result,str) and not result.strip()): raise RuntimeError("Модель вернула пустой ответ")\n            return result,{"provider":provider_label(row),"attempts":len(errors)+1,"fallback_used":bool(errors),"errors":errors}
         except Exception as exc: errors.append({"provider":provider_label(row),"error":str(exc)[:1000]})
     raise RuntimeError("Все выбранные модели недоступны: "+" | ".join(x["provider"]["name"]+": "+x["error"] for x in errors))
