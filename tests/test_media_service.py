@@ -12,7 +12,7 @@ class MediaServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "sample.png"
             path.write_bytes(b"png")
-            self.assertEqual(image_data_url(path), "data:image/png;base64," + base64.b64encode(b"png").decode("ascii"))
+            self.assertEqual(image_data_url(path), "data:image/png;base64," + base64.b64encode(b"\x89PNG\r\n\x1a\npng").decode("ascii"))
 
     def test_multimodal_content_contains_image(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -29,7 +29,7 @@ class MediaServiceTests(unittest.TestCase):
         response.status_code = 200
         response.raise_for_status.return_value = None
         response.json.return_value = {
-            "data": [{"b64_json": base64.b64encode(b"fake-image").decode("ascii")}]
+            "data": [{"b64_json": base64.b64encode(b"\x89PNG\r\n\x1a\nfake-image").decode("ascii")}]
         }
         session.post.return_value = response
 
@@ -40,7 +40,7 @@ class MediaServiceTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 provider = {"base_url": "https://example.com/v1", "api_key": "key", "model": "image-model"}
                 result = generate_image(provider, "a test image", tmp)
-                self.assertEqual(result[0].read_bytes(), b"fake-image")
+                self.assertEqual(result[0].read_bytes(), b"\x89PNG\r\n\x1a\nfake-image")
                 self.assertEqual(session.post.call_count, 1)
         finally:
             media_service.requests = old
