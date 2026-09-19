@@ -1,4 +1,5 @@
 import json
+from llm_execution import classify_error, ERROR_AUTH, ERROR_CONTEXT
 
 TIERS=("router","multimodal","smart","medium","weak")
 TEXT_TIERS=("smart","medium","weak")
@@ -99,7 +100,19 @@ def execute_with_fallback(db,user_id,primary,fallback_ids,call,required_kind=Non
     for row in candidates:
         try:
             result=call(row)
-            if result is None or (isinstance(result,str) and not result.strip()): raise RuntimeError("Модель вернула пустой ответ")
-            return result,{"provider":provider_label(row),"attempts":len(errors)+1,"fallback_used":bool(errors),"errors":errors}
-        except Exception as exc: errors.append({"provider":provider_label(row),"error":str(exc)[:1000]})
-    raise RuntimeError("Все выбранные модели недоступны: "+" | ".join(x["provider"]["name"]+": "+x["error"] for x in errors))
+            if result is None or (isinstance(result,str) and not result.strip()):
+                raise RuntimeError("Модель вернула пустой ответ")
+            return result,{"provider":provider_label(row),"attempts":len(errors)+1,"fallback_used":bool(errors),"errors":errors,"error_class":None}
+        except Exception as exc:
+            kind=classify_error(exc)
+            errors.append({"provider":provider_label(row),"error":str(exc)[:1000],"class":kind})
+            if kind==ERROR_AUTH:
+                continue
+            if kind==ERROR_CONTEXT and row is primary:
+                # Context overflow is recorded explicitly. A compatible fallback may
+                # have a larger context window; routing code can use this metadata
+                # for a future capability-aware escalation.
+                continue
+            if kind in ("INVALID_REQUEST",):
+                continue
+    raise RuntimeError("Все выбранные модели недоступны: "+" | ".join(x["provider"]["name"]+": "+x["class"]+": "+x["error"] for x in errors))
