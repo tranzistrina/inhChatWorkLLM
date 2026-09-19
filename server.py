@@ -5,18 +5,21 @@ from werkzeug.security import generate_password_hash,check_password_hash
 from dotenv import load_dotenv
 from workmode import ingest_uploads,source_context,parse_plan
 from provider_service import ProviderConfigError, auth_headers, candidate_base_urls, discover_models, normalize_base_url, endpoint
+from media_service import is_image_path, multimodal_content, generate_image
 load_dotenv()
 ROOT=Path(__file__).resolve().parent;DATA=ROOT/'data';DATA.mkdir(exist_ok=True);WORK=ROOT/'workspace';WORK.mkdir(exist_ok=True);UPLOADS=WORK/'uploads';UPLOADS.mkdir(exist_ok=True);LIBRARY=WORK/'library';LIBRARY.mkdir(exist_ok=True);DB=DATA/'inhchat.db';USERS=ROOT/'users.json';PORT=int(os.getenv('PORT','6767'));DEEPSEEK=os.getenv('DEEPSEEK_BASE_URL','http://127.0.0.1:9655/v1')
 app=Flask(__name__,static_folder='static',static_url_path='/static');app.secret_key=os.getenv('APP_SECRET_KEY','change-me-in-.env');app.config['MAX_CONTENT_LENGTH']=32*1024*1024
 
 def db():c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;return c
-with db() as c:c.executescript('CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,email TEXT UNIQUE NOT NULL,password_hash TEXT NOT NULL,created_at DATETIME DEFAULT CURRENT_TIMESTAMP);CREATE TABLE IF NOT EXISTS providers(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL,name TEXT NOT NULL,base_url TEXT NOT NULL,api_key TEXT DEFAULT "",model TEXT NOT NULL,kind TEXT DEFAULT "openai",created_at DATETIME DEFAULT CURRENT_TIMESTAMP,UNIQUE(user_id,name));CREATE TABLE IF NOT EXISTS chats(id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,title TEXT NOT NULL,messages TEXT NOT NULL,provider_id INTEGER,archived INTEGER DEFAULT 0,meta_analysis INTEGER DEFAULT 0,temporary INTEGER DEFAULT 0,created_at DATETIME DEFAULT CURRENT_TIMESTAMP,updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);CREATE TABLE IF NOT EXISTS work_runs(id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,chat_id TEXT NOT NULL,request TEXT NOT NULL,source_files TEXT NOT NULL,plan TEXT NOT NULL,results TEXT NOT NULL,final_answer TEXT DEFAULT "",created_at DATETIME DEFAULT CURRENT_TIMESTAMP);')
+with db() as c:c.executescript('CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,email TEXT UNIQUE NOT NULL,password_hash TEXT NOT NULL,created_at DATETIME DEFAULT CURRENT_TIMESTAMP);CREATE TABLE IF NOT EXISTS providers(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL,name TEXT NOT NULL,base_url TEXT NOT NULL,api_key TEXT DEFAULT "",model TEXT NOT NULL,kind TEXT DEFAULT "openai",created_at DATETIME DEFAULT CURRENT_TIMESTAMP,UNIQUE(user_id,name));CREATE TABLE IF NOT EXISTS chats(id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,title TEXT NOT NULL,messages TEXT NOT NULL,provider_id INTEGER,archived INTEGER DEFAULT 0,meta_analysis INTEGER DEFAULT 0,temporary INTEGER DEFAULT 0,image_generation_enabled INTEGER DEFAULT 0,image_provider_id INTEGER,created_at DATETIME DEFAULT CURRENT_TIMESTAMP,updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);CREATE TABLE IF NOT EXISTS work_runs(id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,chat_id TEXT NOT NULL,request TEXT NOT NULL,source_files TEXT NOT NULL,plan TEXT NOT NULL,results TEXT NOT NULL,final_answer TEXT DEFAULT "",created_at DATETIME DEFAULT CURRENT_TIMESTAMP);')
 
 with db() as c:
     cols={r['name'] for r in c.execute('PRAGMA table_info(chats)').fetchall()}
     if 'archived' not in cols: c.execute('ALTER TABLE chats ADD COLUMN archived INTEGER DEFAULT 0')
     if 'meta_analysis' not in cols: c.execute('ALTER TABLE chats ADD COLUMN meta_analysis INTEGER DEFAULT 0')
     if 'temporary' not in cols: c.execute('ALTER TABLE chats ADD COLUMN temporary INTEGER DEFAULT 0')
+    if 'image_generation_enabled' not in cols: c.execute('ALTER TABLE chats ADD COLUMN image_generation_enabled INTEGER DEFAULT 0')
+    if 'image_provider_id' not in cols: c.execute('ALTER TABLE chats ADD COLUMN image_provider_id INTEGER)
 
 def users():
  if not USERS.exists():USERS.write_text(json.dumps([{'username':'admin','password':'676769'}],ensure_ascii=False,indent=2)+'\n');USERS.chmod(0o600)
@@ -52,7 +55,10 @@ def llm(p,messages):
    data=r.json()
    choices=data.get('choices') or []
    if not choices: raise RuntimeError('API не вернул choices')
-   return choices[0].get('message',{}).get('content','')
+   content=choices[0].get('message',{}).get('content','')
+   if isinstance(content,list):
+    return '\n'.join(str(x.get('text','')) for x in content if isinstance(x,dict) and x.get('text'))
+   return str(content or '')
   except requests.HTTPError as exc:
    last_error=exc
    raise
@@ -138,9 +144,11 @@ def add_provider():
  try:base=normalize_base_url(d.get('base_url',''))
  except ProviderConfigError as e:return jsonify(error=str(e)),400
  model=str(d.get('model','')).strip()
+ kind=str(d.get('kind','text')).strip().lower()
+ if kind not in {'text','multimodal','image'}:return jsonify(error='Неизвестный тип модели'),400
  if not name or not model:return jsonify(error='Заполните название, Base URL и модель'),400
  with db() as c:
-  try:r=c.execute('INSERT INTO providers(user_id,name,base_url,api_key,model,kind) VALUES(?,?,?,?,?,?)',(session['uid'],name,base,str(d.get('api_key','')).strip(),model,d.get('kind','openai')))
+  try:r=c.execute('INSERT INTO providers(user_id,name,base_url,api_key,model,kind) VALUES(?,?,?,?,?,?)',(session['uid'],name,base,str(d.get('api_key','')).strip(),model,kind))
   except sqlite3.IntegrityError:return jsonify(error='Провайдер с таким именем уже существует'),409
  return jsonify(id=r.lastrowid,name=name)
 
@@ -153,13 +161,15 @@ def edit_provider(pid):
     try:base=normalize_base_url(d.get('base_url',''))
     except ProviderConfigError as e:return jsonify(error=str(e)),400
     model=str(d.get('model','')).strip()
+    kind=str(d.get('kind','text')).strip().lower()
+    if kind not in {'text','multimodal','image'}:return jsonify(error='Неизвестный тип модели'),400
     if not name or not model:return jsonify(error='Заполните название, Base URL и модель'),400
     with db() as c:
         old=c.execute('SELECT api_key FROM providers WHERE id=? AND user_id=?',(pid,session['uid'])).fetchone()
         if not old:return jsonify(error='Провайдер не найден'),404
         key=str(d.get('api_key','')).strip() or old['api_key']
         try:
-            c.execute('UPDATE providers SET name=?,base_url=?,api_key=?,model=?,kind=? WHERE id=? AND user_id=?',(name,base,key,model,d.get('kind','openai'),pid,session['uid']))
+            c.execute('UPDATE providers SET name=?,base_url=?,api_key=?,model=?,kind=? WHERE id=? AND user_id=?',(name,base,key,model,kind,pid,session['uid']))
         except sqlite3.IntegrityError:return jsonify(error='Провайдер с таким именем уже существует'),409
     return jsonify(ok=True)
 
@@ -235,15 +245,15 @@ def chats():
 @app.post('/api/chats')
 @auth
 def new_chat():
- d=request.json or {};cid=str(uuid.uuid4());title=d.get('title','Новый чат');temporary=1 if bool(d.get('temporary')) else 0;meta=1 if bool(d.get('meta_analysis')) else 0
- with db() as c:c.execute('INSERT INTO chats(id,user_id,title,messages,provider_id,meta_analysis,temporary) VALUES(?,?,?,?,?,?,?)',(cid,session['uid'],title,'[]',d.get('provider_id'),meta,temporary))
+ d=request.json or {};cid=str(uuid.uuid4());title=d.get('title','Новый чат');temporary=1 if bool(d.get('temporary')) else 0;meta=1 if bool(d.get('meta_analysis')) else 0;image_enabled=1 if bool(d.get('image_generation_enabled')) else 0;image_provider_id=d.get('image_provider_id')
+ with db() as c:c.execute('INSERT INTO chats(id,user_id,title,messages,provider_id,meta_analysis,temporary,image_generation_enabled,image_provider_id) VALUES(?,?,?,?,?,?,?,?,?)',(cid,session['uid'],title,'[]',d.get('provider_id'),meta,temporary,image_enabled,image_provider_id))
  return jsonify(id=cid,title=title)
 @app.patch('/api/chats/<cid>')
 @auth
 def edit_chat(cid):
     d=request.json or {}
     title=d.get('title')
-    archived=d.get('archived');meta=d.get('meta_analysis');temporary=d.get('temporary')
+    archived=d.get('archived');meta=d.get('meta_analysis');temporary=d.get('temporary');image_enabled=d.get('image_generation_enabled');image_provider_id=d.get('image_provider_id')
     with db() as c:
         r=c.execute('SELECT id FROM chats WHERE id=? AND user_id=?',(cid,session['uid'])).fetchone()
         if not r:return jsonify(error='not_found'),404
@@ -255,6 +265,11 @@ def edit_chat(cid):
             c.execute('UPDATE chats SET archived=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?',(1 if bool(archived) else 0,cid,session['uid']))
         if meta is not None:c.execute('UPDATE chats SET meta_analysis=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?',(1 if bool(meta) else 0,cid,session['uid']))
         if temporary is not None:c.execute('UPDATE chats SET temporary=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?',(1 if bool(temporary) else 0,cid,session['uid']))
+        if image_enabled is not None:c.execute('UPDATE chats SET image_generation_enabled=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?',(1 if bool(image_enabled) else 0,cid,session['uid']))
+        if image_provider_id is not None:
+            ip=c.execute('SELECT id FROM providers WHERE id=? AND user_id=? AND kind=?',(int(image_provider_id),session['uid'],'image')).fetchone()
+            if not ip:return jsonify(error='Провайдер генерации изображений не найден'),400
+            c.execute('UPDATE chats SET image_provider_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?',(int(image_provider_id),cid,session['uid']))
     return jsonify(ok=True)
 
 @app.delete('/api/chats/<cid>')
@@ -291,21 +306,56 @@ def message(cid):
     p=provider(int(pid)) if pid else None
     if not content:return jsonify(error='Пустое сообщение'),400
     if not p:return jsonify(error='Провайдер не выбран'),400
+    if p['kind']=='image':return jsonify(error='Выбран провайдер генерации изображений, а не чат-модель'),400
     uploads=request.files.getlist('files')
-    source=[]
+    source=[];image_paths=[];uploaded_files=[]
     if uploads:
         dest=UPLOADS/cid
-        try:source,_,_=ingest_uploads(uploads,dest)
+        try:
+            source,_,_=ingest_uploads(uploads,dest)
+            for f in uploads:
+                name=Path(f.filename or '').name
+                if name:
+                    saved=(dest/name).resolve()
+                    if saved.is_file() and is_image_path(saved):image_paths.append(saved)
+                    if saved.is_file():uploaded_files.append(str(saved.relative_to(WORK)))
         except Exception as e:return jsonify(error=str(e)),400
+    if image_paths and p['kind']!='multimodal':
+        return jsonify(error='Для отправки изображений выберите мультимодальную модель в настройках провайдера'),400
     history=json.loads(chat['messages'])
-    messages=[{'role':'system','content':'Ты полезный ассистент. Отвечай по существу и используй доступные материалы. Общая библиотека файлов доступна между чатами. Используй её только когда это нужно.\\n\\nОБЩАЯ БИБЛИОТЕКА:\\n'+library_text()}]
+    messages=[{'role':'system','content':'Ты полезный ассистент. Отвечай по существу и используй доступные материалы. Общая библиотека файлов доступна между чатами. Используй её только когда это нужно.\n\nОБЩАЯ БИБЛИОТЕКА:\n'+library_text()}]
     messages += [{'role':m['role'],'content':m.get('content','')} for m in history[-20:] if m.get('role') in ('user','assistant')]
     if chat['meta_analysis']:messages.append({'role':'system','content':'МЕТААНАЛИЗ ВКЛЮЧЕН. Контекст других чатов пользователя:\n\n'+meta_chat_context(cid)})
     if source:messages.append({'role':'user','content':source_context(source)})
-    messages.append({'role':'user','content':content})
+    messages.append({'role':'user','content':multimodal_content(content,image_paths) if image_paths else content})
     try:answer=llm(p,messages)
     except Exception as e:return jsonify(error=f'LLM: {e}'),502
     title=chat['title']
     if title=='Новый чат':title=content[:48] or title
-    save_chat(cid,[{'role':'user','content':content},{'role':'assistant','content':answer}],title,int(pid))
+    user_files=files_out(uploaded_files)
+    save_chat(cid,[{'role':'user','content':content,'files':user_files},{'role':'assistant','content':answer,'files':[]}],title,int(pid))
     return jsonify(answer=answer,title=title,files=[])
+
+@app.post('/api/chats/<cid>/generate-image')
+@auth
+def chat_generate_image(cid):
+    with db() as c:
+        chat=c.execute('SELECT * FROM chats WHERE id=? AND user_id=?',(cid,session['uid'])).fetchone()
+    if not chat:return jsonify(error='not_found'),404
+    image_pid=chat['image_provider_id']
+    if not chat['image_generation_enabled'] or not image_pid:return jsonify(error='Генерация изображений выключена для этого чата'),400
+    image_provider=provider(int(image_pid))
+    if not image_provider or image_provider['kind']!='image':return jsonify(error='Провайдер изображений не найден'),400
+    text=str(request.json.get('prompt','')).strip() if request.is_json else ''
+    if not text:return jsonify(error='Укажите, что должно быть изображено'),400
+    chat_pid=chat['provider_id']
+    chat_provider=provider(int(chat_pid)) if chat_pid else None
+    if not chat_provider or chat_provider['kind']=='image':return jsonify(error='Для подготовки промпта нужна текстовая или мультимодальная модель чата'),400
+    try:
+        prompt=llm(chat_provider,[{'role':'system','content':'Ты режиссёр промптов для генерации изображений. Преврати запрос пользователя в один точный промпт для image generation. Не добавляй пояснений, кавычек, списков и мета-комментариев. Сохраняй намерение пользователя и при необходимости уточняй композицию, стиль, свет, камеру и формат.'},{'role':'user','content':text}]).strip()
+        out=generate_image(image_provider,prompt,UPLOADS/cid/'generated',prefix='image')
+        rels=[str(x.relative_to(WORK)) for x in out]
+        files=files_out(rels)
+        save_chat(cid,[{'role':'user','content':text},{'role':'assistant','content':'Сгенерировано изображение.\n\n[[ATTACH: '+rels[0]+']]','files':files}],chat['title'],chat['provider_id'])
+        return jsonify(prompt=prompt,files=files)
+    except Exception as e:return jsonify(error=f'Генерация изображения: {e}'),502
