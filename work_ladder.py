@@ -1,5 +1,6 @@
 import json
 from llm_execution import classify_error, ERROR_AUTH, ERROR_CONTEXT
+from provider_capabilities import requirements
 
 TIERS=("router","multimodal","smart","medium","weak")
 TEXT_TIERS=("smart","medium","weak")
@@ -85,8 +86,12 @@ def route_tasks(router_call,tasks,request_text,has_images=False):
     return parse_router_response(raw,tasks),raw
 
 def choose_task_role(task,settings,image_required=False):
-    if image_required: return "multimodal" if settings.get("multimodal_provider_id") else "smart"
+    req=requirements(task,image_required)
+    if req["vision"] and settings.get("multimodal_provider_id"):
+        return "multimodal"
     tier=str(task.get("tier") or "medium").lower()
+    if req["coding"] or req["reasoning"]:
+        tier="smart"
     return tier if tier in TEXT_TIERS else "medium"
 
 def execute_with_fallback(db,user_id,primary,fallback_ids,call,required_kind=None):
