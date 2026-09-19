@@ -66,5 +66,5 @@ function bind(){
   }
  });
 }
-if(q('#modal')){load();bind();}
+const originalOpenSettings=window.openSettings; window.openSettings=function(){if(typeof originalOpenSettings==='function')originalOpenSettings();load()}; if(q('#modal')){load();bind();}
 })();
