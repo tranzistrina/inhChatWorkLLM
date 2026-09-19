@@ -1,6 +1,7 @@
 """Media helpers for multimodal chat input and OpenAI-compatible image generation."""
 import base64
 import mimetypes
+import os
 import re
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -17,6 +18,24 @@ IMAGE_EXTENSIONS = {
     ".webp": "image/webp",
     ".gif": "image/gif",
 }
+MAX_IMAGE_INPUT_BYTES = int(os.getenv("MAX_IMAGE_INPUT_BYTES", str(12 * 1024 * 1024)))
+MAX_GENERATED_IMAGE_BYTES = int(os.getenv("MAX_GENERATED_IMAGE_BYTES", str(20 * 1024 * 1024)))
+MAX_IMAGE_DOWNLOAD_BYTES = int(os.getenv("MAX_IMAGE_DOWNLOAD_BYTES", str(20 * 1024 * 1024)))
+
+_IMAGE_SIGNATURES = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"RIFF", "image/webp"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+)
+
+def _validate_image_bytes(data):
+    if len(data) > MAX_IMAGE_INPUT_BYTES:
+        raise ValueError("Изображение слишком большое")
+    if not any(data.startswith(signature) for signature, _ in _IMAGE_SIGNATURES):
+        raise ValueError("Файл не похож на поддерживаемое изображение")
+
 
 
 def is_image_path(path):
@@ -28,7 +47,9 @@ def image_data_url(path):
     mime = IMAGE_EXTENSIONS.get(p.suffix.lower()) or mimetypes.guess_type(p.name)[0]
     if not mime or not mime.startswith("image/"):
         return None
-    return "data:%s;base64,%s" % (mime, base64.b64encode(p.read_bytes()).decode("ascii"))
+    data = p.read_bytes()
+    _validate_image_bytes(data)
+    return "data:%s;base64,%s" % (mime, base64.b64encode(data).decode("ascii"))
 
 
 def multimodal_content(text, image_paths):
@@ -118,9 +139,14 @@ def generate_image(provider, prompt, output_dir, prefix="generated"):
         b64 = item.get("b64_json")
         if b64:
             try:
+                if len(str(b64)) > ((MAX_GENERATED_IMAGE_BYTES * 4 // 3) + 16):
+                    raise RuntimeError("Image API вернул слишком большое изображение")
                 raw = base64.b64decode(b64, validate=True)
+                if len(raw) > MAX_GENERATED_IMAGE_BYTES:
+                    raise RuntimeError("Image API вернул слишком большое изображение")
+                _validate_image_bytes(raw)
             except (ValueError, TypeError) as exc:
-                raise RuntimeError("Image API вернул некорректный base64") from exc
+                raise RuntimeError("Image API вернул некорректный или неподдерживаемый image payload") from exc
             path = Path(output_dir) / ("%s_%02d.png" % (re.sub(r"[^a-zA-Z0-9_-]+", "_", prefix)[:40] or "generated", index))
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(raw)
@@ -130,15 +156,37 @@ def generate_image(provider, prompt, output_dir, prefix="generated"):
         url = str(item.get("url") or "").strip()
         parsed = urlsplit(url)
         if url and parsed.scheme in {"http", "https"} and parsed.hostname and parsed.hostname.lower() in provider_hosts:
-            downloaded = requests.get(url, timeout=120, headers=auth_headers(provider["api_key"]))
+            downloaded = requests.get(url, timeout=120, headers=auth_headers(provider["api_key"]), stream=True)
             downloaded.raise_for_status()
-            mime = downloaded.headers.get("Content-Type", "")
+            mime = downloaded.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
             if not mime.startswith("image/"):
+                downloaded.close()
                 raise RuntimeError("Image API вернул URL не изображения")
-            suffix = mimetypes.guess_extension(mime.split(";", 1)[0].strip()) or ".png"
+            length = downloaded.headers.get("Content-Length")
+            if length and int(length) > MAX_IMAGE_DOWNLOAD_BYTES:
+                downloaded.close()
+                raise RuntimeError("Image API вернул слишком большой файл")
+            chunks = []
+            total = 0
+            try:
+                for chunk in downloaded.iter_content(chunk_size=64 * 1024):
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > MAX_IMAGE_DOWNLOAD_BYTES:
+                        raise RuntimeError("Image API вернул слишком большой файл")
+                    chunks.append(chunk)
+            finally:
+                downloaded.close()
+            raw = b"".join(chunks)
+            try:
+                _validate_image_bytes(raw)
+            except ValueError as exc:
+                raise RuntimeError("Image API вернул неподдерживаемый image payload") from exc
+            suffix = mimetypes.guess_extension(mime) or ".png"
             path = Path(output_dir) / ("%s_%02d%s" % (re.sub(r"[^a-zA-Z0-9_-]+", "_", prefix)[:40] or "generated", index, suffix))
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(downloaded.content)
+            path.write_bytes(raw)
             out.append(path)
             continue
     if not out:
