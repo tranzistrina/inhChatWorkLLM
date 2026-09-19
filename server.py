@@ -249,6 +249,14 @@ def del_provider(pid):
   if not exists:return jsonify(error='Провайдер не найден'),404
   c.execute('UPDATE chats SET provider_id=NULL,updated_at=CURRENT_TIMESTAMP WHERE provider_id=? AND user_id=?',(pid,session['uid']))
   c.execute('UPDATE chats SET image_generation_enabled=0,image_provider_id=NULL,updated_at=CURRENT_TIMESTAMP WHERE image_provider_id=? AND user_id=?',(pid,session['uid']))
+  try:
+   row=c.execute('SELECT fallback_provider_ids FROM work_ladder_settings WHERE user_id=?',(session['uid'],)).fetchone()
+   if row:
+    try: fallback=[x for x in json.loads(row['fallback_provider_ids'] or '[]') if int(x)!=pid]
+    except (TypeError,ValueError): fallback=[]
+    c.execute('UPDATE work_ladder_settings SET router_provider_id=CASE WHEN router_provider_id=? THEN NULL ELSE router_provider_id END,multimodal_provider_id=CASE WHEN multimodal_provider_id=? THEN NULL ELSE multimodal_provider_id END,smart_provider_id=CASE WHEN smart_provider_id=? THEN NULL ELSE smart_provider_id END,medium_provider_id=CASE WHEN medium_provider_id=? THEN NULL ELSE medium_provider_id END,weak_provider_id=CASE WHEN weak_provider_id=? THEN NULL ELSE weak_provider_id END,fallback_provider_ids=?,updated_at=CURRENT_TIMESTAMP WHERE user_id=?',(pid,pid,pid,pid,pid,json.dumps(fallback),session['uid']))
+   except sqlite3.OperationalError:
+   pass
   c.execute('DELETE FROM providers WHERE id=? AND user_id=?',(pid,session['uid']))
  return jsonify(ok=True)
 
