@@ -18,7 +18,7 @@ with db() as c:
     if 'allow_invention' not in cols: c.execute('ALTER TABLE work_runs ADD COLUMN allow_invention INTEGER DEFAULT 0')
     if 'max_tasks' not in cols: c.execute('ALTER TABLE work_runs ADD COLUMN max_tasks INTEGER DEFAULT 12')
     if 'recommended_tasks' not in cols: c.execute('ALTER TABLE work_runs ADD COLUMN recommended_tasks INTEGER DEFAULT 8')
-    if 'ladder_settings' not in cols: c.execute('ALTER TABLE work_runs ADD COLUMN ladder_settings TEXT DEFAULT \'{}\'
+    if 'ladder_settings' not in cols: c.execute("ALTER TABLE work_runs ADD COLUMN ladder_settings TEXT DEFAULT '{}'" )
     c.execute('''CREATE TABLE IF NOT EXISTS work_events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL,chat_id TEXT NOT NULL,user_id INTEGER NOT NULL,kind TEXT NOT NULL,message TEXT NOT NULL,data TEXT DEFAULT '{}',created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 init_ladder_db(db)
 
