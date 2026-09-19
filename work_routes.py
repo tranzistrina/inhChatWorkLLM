@@ -4,6 +4,7 @@ from flask import request, jsonify, send_file, session
 from server import app, db, auth, provider, llm, WORK, DEEPSEEK
 from workmode import ingest_uploads, source_context, parse_plan, create_archive
 from report_builder import build_report_files, strict_system_prompt
+from media_service import generate_image, image_paths_under, multimodal_content
 from server import LIBRARY
 
 CHAT_ROOT = WORK / 'chats'; CHAT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -112,8 +113,23 @@ def parse_directives(raw):
     for m in re.finditer(r'ARCHIVE:\s*([^\n]+)\nFILES:\s*([^\n]+)',raw or '',re.I):archives.append((m.group(1).strip(),[x.strip() for x in re.split(r'[,;]',m.group(2)) if x.strip()]))
     return copies,attaches,archives
 
+def chat_image_settings(cid):
+    with db() as c:
+        row=c.execute('SELECT image_generation_enabled,image_provider_id FROM chats WHERE id=? AND user_id=?',(cid,session['uid'])).fetchone()
+    if not row:return False,None
+    return bool(row['image_generation_enabled']),row['image_provider_id']
+
+def available_image_paths(cid,iteration):
+    return [x for x in image_paths_under(chat_root(cid),[f['path'] for f in all_chat_files(cid,iteration)])][:12]
+
 def materialize_task(cid,iteration,raw):
     root=chat_root(cid);current=iteration_root(cid,iteration);made=[]
+    image_enabled,image_provider_id=chat_image_settings(cid)
+    image_provider=provider(int(image_provider_id)) if image_provider_id else None
+    for n,prompt in enumerate(re.findall(r'GENERATE_IMAGE:\s*([^\n]+)',raw or '',re.I),1):
+        if not image_enabled or not image_provider or image_provider['kind']!='image': continue
+        generated=generate_image(image_provider,prompt,current/'generated',prefix='task_%d_image_%d' % (iteration,n))
+        made.extend(str(x.relative_to(root)) for x in generated)
     for m in re.finditer(r'FILE:\s*([^\n]+)\n([\s\S]*?)(?=\nFILE:|\nCOPY_FROM:|\nARCHIVE:|\Z)',raw or '',re.I):
         try:p=safe_file(current,m.group(1).strip());p.parent.mkdir(parents=True,exist_ok=True);p.write_text(m.group(2),encoding='utf-8');made.append(str(p.relative_to(root)))
         except ValueError:continue
@@ -189,12 +205,13 @@ def task(cid):
     tasks=json.loads(r['plan']);results=json.loads(r['results'])
     if idx<0 or idx>=len(tasks):return jsonify(error='Неверный номер задачи'),400
     src=json.loads(r['source_files']);meta=bool(r['meta_analysis']) if 'meta_analysis' in r.keys() else False;previous='\n\n'.join(f'TASK {x["index"]+1}:\n{x["result"]}' for x in results);available='\n'.join('- '+x['path'] for x in all_chat_files(cid,r['iteration']))
-    prompt=[{'role':'system','content':'''Execution stage. Execute ONLY the assigned task. This chat is isolated. You can read any AVAILABLE FILE from this chat, including previous iterations. You can copy a previous file into the current iteration.
+    image_enabled,image_provider_id=chat_image_settings(cid);image_paths=available_image_paths(cid,r['iteration']) if image_enabled and p['kind']=='multimodal' else [];task_text=f'Original request:\n{r["request"]}\n\nAssigned task:\n{json.dumps(tasks[idx],ensure_ascii=False)}\n\nAVAILABLE FILES:\n{available}\n\nSOURCE TEXT:\n{context_for_task(cid,r["iteration"],src)}\n\nPREVIOUS TASK RESULTS:\n{previous}';prompt=[{'role':'system','content':'''Execution stage. Execute ONLY the assigned task. This chat is isolated. You can read any AVAILABLE FILE from this chat, including previous iterations. You can copy a previous file into the current iteration.
 Create text artifacts with FILE:path followed by full content. Paths after FILE are relative to the CURRENT iteration.
 Copy with COPY_FROM: iterations/N/path => destination/path.
 Create a ZIP with ARCHIVE: name.zip followed by FILES: path1, path2. FILES may reference any iteration in this chat.
 Clone a public GitHub repository with GITHUB: https://github.com/owner/repo => repo_name. Only github.com public repository URLs are allowed.
-Do not perform other tasks.'''.strip()},{'role':'user','content':f'Original request:\n{r["request"]}\n\nAssigned task:\n{json.dumps(tasks[idx],ensure_ascii=False)}\n\nAVAILABLE FILES:\n{available}\n\nSOURCE TEXT:\n{context_for_task(cid,r["iteration"],src)}\n\nPREVIOUS TASK RESULTS:\n{previous}'}]
+If image generation is enabled for this chat, you may request an image with a line beginning GENERATE_IMAGE:. Everything after that marker must be the complete image-generation prompt written by you.
+Do not perform other tasks.'''.strip()},{'role':'user','content':multimodal_content(task_text,image_paths) if image_paths else task_text}]
     emit(r['id'],cid,'task_start',f'Выполняю задачу {idx+1} из {len(tasks)}',{'index':idx})
     try:raw=llm(p,prompt);made=materialize_task(cid,r['iteration'],raw)
     except Exception as e:emit(r['id'],cid,'error',str(e),{'index':idx});return jsonify(error=str(e)),500
@@ -207,11 +224,11 @@ Do not perform other tasks.'''.strip()},{'role':'user','content':f'Original requ
 def final(cid):
     d=request.json or {};p=provider(int(d.get('provider_id') or 0));r=run_row(cid)
     if not p or not r:return jsonify(error='Рабочая сессия или провайдер не найдены'),400
-    results=json.loads(r['results']);src=json.loads(r['source_files']);meta=bool(r['meta_analysis']) if 'meta_analysis' in r.keys() else False;work='\n\n'.join(f'TASK {x["index"]+1}:\n{x["result"]}' for x in results);available='\n'.join('- '+x['path'] for x in all_chat_files(cid,r['iteration']))
+    results=json.loads(r['results']);src=json.loads(r['source_files']);meta=bool(r['meta_analysis']) if 'meta_analysis' in r.keys() else False;work='\n\n'.join(f'TASK {x["index"]+1}:\n{x["result"]}' for x in results);available='\n'.join('- '+x['path'] for x in all_chat_files(cid,r['iteration']));final_image_enabled,final_image_provider_id=chat_image_settings(cid);final_image_paths=available_image_paths(cid,r['iteration']) if final_image_enabled and p['kind']=='multimodal' else []
     emit(r['id'],cid,'final_start','Готовлю итоговый ответ и выбираю вложения')
     strict=bool(r['strict_formatting']) if 'strict_formatting' in r.keys() else False
     if strict:
-        prompt=[{'role':'system','content':strict_system_prompt(bool(r['allow_invention']) if 'allow_invention' in r.keys() else False)},{'role':'user','content':r['request']+'\n\nSOURCE FILES:\n'+context_for_task(cid,r['iteration'],src)+'\n\nCOMPLETED TASKS:\n'+work+'\n\nAVAILABLE FILES:\n'+available}]
+        final_text=r['request']+'\n\nSOURCE FILES:\n'+context_for_task(cid,r['iteration'],src)+'\n\nCOMPLETED TASKS:\n'+work+'\n\nAVAILABLE FILES:\n'+available;prompt=[{'role':'system','content':strict_system_prompt(bool(r['allow_invention']) if 'allow_invention' in r.keys() else False)},{'role':'user','content':multimodal_content(final_text,final_image_paths) if final_image_paths else final_text}]
     else:
         prompt=[{'role':'system','content':'Final synthesis stage. Prepare the final answer from completed task results. Do not invent work. Decide which files, if any, should be attached. Insert a file anywhere in the response with [[ATTACH: path]]. A selected file may be from any previous iteration of this same chat. Attach only files materially useful to the user.'},{'role':'user','content':r['request']+'\n\nSHARED LIBRARY:\n'+shared_library_context()+'\n\nCROSS-CHAT META ANALYSIS:\n'+(meta_chat_context() if meta else '(Выключен. Другие чаты недоступны.)')+'\n\nAVAILABLE FILES:\n'+available+'\n\nSOURCE FILES:\n'+context_for_task(cid,r['iteration'],src)+'\n\nCOMPLETED TASKS:\n'+work}]
     try:answer=llm(p,prompt)
