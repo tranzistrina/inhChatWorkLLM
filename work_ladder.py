@@ -45,7 +45,7 @@ def save_settings(db,user_id,payload):
         if row and str(row["kind"] or "text")!="image" and row["id"] not in fallbacks: fallbacks.append(int(row["id"]))
         if len(fallbacks)>=MAX_FALLBACKS: break
     enabled=bool(payload.get("enabled"))
-    for role,label in (("router","роутер"),("smart","умная"),("medium","средняя"),("weak","слабая")):
+    for role,label in (("router","роутер"),("multimodal","мультимодальная"),("smart","умная"),("medium","средняя"),("weak","слабая")):
         if enabled and not values[role+"_provider_id"]: raise ValueError("Для лестницы нужна "+label+" модель")
     with db() as c:
         c.execute("INSERT INTO work_ladder_settings (user_id,enabled,router_provider_id,multimodal_provider_id,smart_provider_id,medium_provider_id,weak_provider_id,fallback_provider_ids) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET enabled=excluded.enabled,router_provider_id=excluded.router_provider_id,multimodal_provider_id=excluded.multimodal_provider_id,smart_provider_id=excluded.smart_provider_id,medium_provider_id=excluded.medium_provider_id,weak_provider_id=excluded.weak_provider_id,fallback_provider_ids=excluded.fallback_provider_ids,updated_at=CURRENT_TIMESTAMP",(user_id,int(enabled),values["router_provider_id"],values["multimodal_provider_id"],values["smart_provider_id"],values["medium_provider_id"],values["weak_provider_id"],json.dumps(fallbacks)))
