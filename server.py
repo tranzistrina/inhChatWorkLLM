@@ -83,15 +83,38 @@ def library_text():
             except OSError:pass
     return source_context(out)[:800000] if out else '(Библиотека пуста)'
 
-def files_out(paths):
+def files_out(paths,cid=None):
  out=[]
  for rel in paths:
-  p=(WORK/rel).resolve()
-  if WORK in p.parents and p.is_file():out.append({'name':p.name,'size':p.stat().st_size,'url':'/api/files/'+str(p.relative_to(WORK))})
+  rel=str(rel)
+  if cid and not rel.startswith('uploads/'):
+   p=(WORK/'chats'/cid/rel).resolve()
+   if (WORK/'chats'/cid).resolve() not in p.parents:continue
+   url='/api/files/'+cid+'/'+rel
+  else:
+   p=(WORK/rel).resolve()
+   if WORK not in p.parents:continue
+   if cid and rel.startswith('uploads/'+cid+'/'):
+    url='/api/uploads/'+cid+'/'+rel.split('uploads/'+cid+'/',1)[1]
+   else:
+    url='/api/files/'+rel
+  if p.is_file():
+   mime='image/'+p.suffix.lower().lstrip('.') if p.suffix.lower() in {'.png','.jpg','.jpeg','.webp','.gif'} else ''
+   out.append({'name':p.name,'path':rel,'size':p.stat().st_size,'mime':mime,'url':url})
  return out
 @app.get('/')
 def index():return send_from_directory('static','index.html')
 @app.get('/api/me')
+@app.get('/api/uploads/<cid>/<path:rel>')
+@auth
+def uploaded_file(cid,rel):
+    with db() as c:
+        if not c.execute('SELECT id FROM chats WHERE id=? AND user_id=?',(cid,session['uid'])).fetchone():return jsonify(error='not_found'),404
+    root=(UPLOADS/cid).resolve()
+    p=(root/rel).resolve()
+    if root not in p.parents or not p.is_file():return jsonify(error='Файл не найден'),404
+    return send_file(p,as_attachment=True,download_name=p.name)
+
 def me():
  with db() as c:u=c.execute('SELECT id,email FROM users WHERE id=?',(session.get('uid',-1),)).fetchone()
  return jsonify({'user':dict(u) if u else None})
@@ -332,7 +355,7 @@ def message(cid):
     except Exception as e:return jsonify(error=f'LLM: {e}'),502
     title=chat['title']
     if title=='Новый чат':title=content[:48] or title
-    user_files=files_out(uploaded_files)
+    user_files=files_out(uploaded_files,cid)
     save_chat(cid,[{'role':'user','content':content,'files':user_files},{'role':'assistant','content':answer,'files':[]}],title,int(pid))
     return jsonify(answer=answer,title=title,files=[])
 
@@ -353,9 +376,9 @@ def chat_generate_image(cid):
     if not chat_provider or chat_provider['kind']=='image':return jsonify(error='Для подготовки промпта нужна текстовая или мультимодальная модель чата'),400
     try:
         prompt=llm(chat_provider,[{'role':'system','content':'Ты режиссёр промптов для генерации изображений. Преврати запрос пользователя в один точный промпт для image generation. Не добавляй пояснений, кавычек, списков и мета-комментариев. Сохраняй намерение пользователя и при необходимости уточняй композицию, стиль, свет, камеру и формат.'},{'role':'user','content':text}]).strip()
-        out=generate_image(image_provider,prompt,UPLOADS/cid/'generated',prefix='image')
-        rels=[str(x.relative_to(WORK)) for x in out]
-        files=files_out(rels)
+        out=generate_image(image_provider,prompt,WORK/'chats'/cid/'generated',prefix='image')
+        rels=[str(x.relative_to(WORK/'chats'/cid)) for x in out]
+        files=files_out(rels,cid)
         save_chat(cid,[{'role':'user','content':text},{'role':'assistant','content':'Сгенерировано изображение.\n\n[[ATTACH: '+rels[0]+']]','files':files}],chat['title'],chat['provider_id'])
         return jsonify(prompt=prompt,files=files)
     except Exception as e:return jsonify(error=f'Генерация изображения: {e}'),502
