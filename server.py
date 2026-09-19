@@ -1,4 +1,4 @@
-import os,json,uuid,sqlite3,subprocess
+import os,json,uuid,sqlite3,subprocess,secrets
 from pathlib import Path
 from flask import Flask,request,jsonify,session,send_from_directory,send_file
 from werkzeug.security import generate_password_hash,check_password_hash
@@ -8,7 +8,26 @@ from provider_service import ProviderConfigError, auth_headers, candidate_base_u
 from media_service import is_image_path, multimodal_content, generate_image
 load_dotenv()
 ROOT=Path(__file__).resolve().parent;DATA=ROOT/'data';DATA.mkdir(exist_ok=True);WORK=ROOT/'workspace';WORK.mkdir(exist_ok=True);UPLOADS=WORK/'uploads';UPLOADS.mkdir(exist_ok=True);LIBRARY=WORK/'library';LIBRARY.mkdir(exist_ok=True);DB=DATA/'inhchat.db';USERS=ROOT/'users.json';PORT=int(os.getenv('PORT','6767'));DEEPSEEK=os.getenv('DEEPSEEK_BASE_URL','http://127.0.0.1:9655/v1')
-app=Flask(__name__,static_folder='static',static_url_path='/static');app.secret_key=os.getenv('APP_SECRET_KEY','change-me-in-.env');app.config['MAX_CONTENT_LENGTH']=32*1024*1024
+app=Flask(__name__,static_folder='static',static_url_path='/static')
+_SECRET_FILE=DATA/'session_secret'
+def _load_secret():
+    value=os.getenv('APP_SECRET_KEY','').strip()
+    if value:return value
+    if _SECRET_FILE.exists():
+        value=_SECRET_FILE.read_text(encoding='utf-8').strip()
+        if value:return value
+    value=secrets.token_urlsafe(48)
+    _SECRET_FILE.write_text(value+'\n',encoding='utf-8')
+    try:_SECRET_FILE.chmod(0o600)
+    except OSError:pass
+    return value
+app.secret_key=_load_secret()
+app.config.update(
+    MAX_CONTENT_LENGTH=32*1024*1024,
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+    SESSION_COOKIE_SECURE=os.getenv('SESSION_COOKIE_SECURE','0').lower() in {'1','true','yes'},
+)
 
 def db():c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;return c
 with db() as c:c.executescript('CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,email TEXT UNIQUE NOT NULL,password_hash TEXT NOT NULL,created_at DATETIME DEFAULT CURRENT_TIMESTAMP);CREATE TABLE IF NOT EXISTS providers(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL,name TEXT NOT NULL,base_url TEXT NOT NULL,api_key TEXT DEFAULT "",model TEXT NOT NULL,kind TEXT DEFAULT "openai",created_at DATETIME DEFAULT CURRENT_TIMESTAMP,UNIQUE(user_id,name));CREATE TABLE IF NOT EXISTS chats(id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,title TEXT NOT NULL,messages TEXT NOT NULL,provider_id INTEGER,archived INTEGER DEFAULT 0,meta_analysis INTEGER DEFAULT 0,temporary INTEGER DEFAULT 0,image_generation_enabled INTEGER DEFAULT 0,image_provider_id INTEGER,created_at DATETIME DEFAULT CURRENT_TIMESTAMP,updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);CREATE TABLE IF NOT EXISTS work_runs(id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,chat_id TEXT NOT NULL,request TEXT NOT NULL,source_files TEXT NOT NULL,plan TEXT NOT NULL,results TEXT NOT NULL,final_answer TEXT DEFAULT "",created_at DATETIME DEFAULT CURRENT_TIMESTAMP);')
@@ -22,8 +41,16 @@ with db() as c:
     if 'image_provider_id' not in cols: c.execute('ALTER TABLE chats ADD COLUMN image_provider_id INTEGER)
 
 def users():
- if not USERS.exists():USERS.write_text(json.dumps([{'username':'admin','password':'676769'}],ensure_ascii=False,indent=2)+'\n');USERS.chmod(0o600)
- return json.loads(USERS.read_text())
+ if not USERS.exists():
+  password=os.getenv('ADMIN_PASSWORD','').strip()
+  if not password:
+   password=secrets.token_urlsafe(18)
+   print('Первичный пароль admin создан автоматически: '+password)
+   print('Сохраните его в безопасном месте и задайте ADMIN_PASSWORD после первого запуска.')
+  USERS.write_text(json.dumps([{'username':'admin','password':password}],ensure_ascii=False,indent=2)+'\n')
+  try:USERS.chmod(0o600)
+  except OSError:pass
+ return json.loads(USERS.read_text(encoding='utf-8'))
 def sync():
  with db() as c:
   for u in users():
@@ -105,6 +132,11 @@ def files_out(paths,cid=None):
 @app.get('/')
 def index():return send_from_directory('static','index.html')
 @app.get('/api/me')
+@auth
+def me():
+ with db() as c:u=c.execute('SELECT id,email FROM users WHERE id=?',(session.get('uid',-1),)).fetchone()
+ return jsonify({'user':dict(u) if u else None})
+
 @app.get('/api/uploads/<cid>/<path:rel>')
 @auth
 def uploaded_file(cid,rel):
@@ -114,10 +146,6 @@ def uploaded_file(cid,rel):
     p=(root/rel).resolve()
     if root not in p.parents or not p.is_file():return jsonify(error='Файл не найден'),404
     return send_file(p,as_attachment=True,download_name=p.name)
-
-def me():
- with db() as c:u=c.execute('SELECT id,email FROM users WHERE id=?',(session.get('uid',-1),)).fetchone()
- return jsonify({'user':dict(u) if u else None})
 @app.post('/api/auth/login')
 def login():
  d=request.json or {};name=str(d.get('username','')).lower().strip();u=next((x for x in users() if str(x['username']).lower()==name),None)
@@ -127,6 +155,18 @@ def login():
  session['uid']=r['id'];return jsonify(ok=True,user={'id':r['id'],'username':name})
 @app.post('/api/auth/logout')
 def logout():session.clear();return jsonify(ok=True)
+
+@app.before_request
+def csrf_origin_guard():
+    if request.method in {'GET','HEAD','OPTIONS'} or request.endpoint in {'login','logout'}:
+        return None
+    origin=request.headers.get('Origin')
+    if not origin:
+        return None
+    expected=request.host_url.rstrip('/')
+    if origin.rstrip('/')!=expected:
+        return jsonify(error='Недопустимый источник запроса'),403
+    return None
 @app.get('/api/providers')
 @auth
 def providers():
@@ -203,7 +243,10 @@ def edit_provider(pid):
 @auth
 def del_provider(pid):
  with db() as c:
-  c.execute('UPDATE chats SET image_generation_enabled=0,image_provider_id=NULL WHERE image_provider_id=? AND user_id=?',(pid,session['uid']))
+  exists=c.execute('SELECT id FROM providers WHERE id=? AND user_id=?',(pid,session['uid'])).fetchone()
+  if not exists:return jsonify(error='Провайдер не найден'),404
+  c.execute('UPDATE chats SET provider_id=NULL,updated_at=CURRENT_TIMESTAMP WHERE provider_id=? AND user_id=?',(pid,session['uid']))
+  c.execute('UPDATE chats SET image_generation_enabled=0,image_provider_id=NULL,updated_at=CURRENT_TIMESTAMP WHERE image_provider_id=? AND user_id=?',(pid,session['uid']))
   c.execute('DELETE FROM providers WHERE id=? AND user_id=?',(pid,session['uid']))
  return jsonify(ok=True)
 
