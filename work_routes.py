@@ -280,7 +280,7 @@ Do not perform other tasks.'''.strip()},{'role':'user','content':multimodal_cont
     results=[x for x in results if x['index']!=idx]
     results.append({'index':idx,'result':raw,'files':made,'tier':role,'model':actual,'fallback':exec_meta})
     with db() as c:c.execute('UPDATE work_runs SET results=? WHERE id=?',(json.dumps(sorted(results,key=lambda x:x['index']),ensure_ascii=False),r['id']))
-    emit(r['id'],cid,'task_done',f'Задача {idx+1} завершена',{'index':idx,'files':len(made),'tier':role,'model':actual,'fallback_used':exec_meta.get('fallback_used',False),'attempts':exec_meta.get('attempts',1)})
+    emit(r['id'],cid,'task_done',f'Задача {idx+1} завершена · {role} · {actual["model"]}',{'index':idx,'files':len(made),'tier':role,'model':actual,'fallback_used':exec_meta.get('fallback_used',False),'attempts':exec_meta.get('attempts',1)})
     return jsonify(result=raw,files=artifact_info(cid,made),routing={'tier':role,'model':actual,'fallback':exec_meta})
 
 @app.post('/api/work/final/<cid>')
