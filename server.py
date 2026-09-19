@@ -8,6 +8,8 @@ from provider_service import ProviderConfigError, auth_headers, candidate_base_u
 from media_service import is_image_path, multimodal_content, generate_image
 load_dotenv()
 ROOT=Path(__file__).resolve().parent;DATA=ROOT/'data';DATA.mkdir(exist_ok=True);WORK=ROOT/'workspace';WORK.mkdir(exist_ok=True);UPLOADS=WORK/'uploads';UPLOADS.mkdir(exist_ok=True);LIBRARY=WORK/'library';LIBRARY.mkdir(exist_ok=True);DB=DATA/'inhchat.db';USERS=ROOT/'users.json';PORT=int(os.getenv('PORT','6767'));DEEPSEEK=os.getenv('DEEPSEEK_BASE_URL','http://127.0.0.1:9655/v1')
+MAX_LIBRARY_CONTEXT_CHARS=int(os.getenv('MAX_LIBRARY_CONTEXT_CHARS','200000'))
+MAX_META_CONTEXT_CHARS=int(os.getenv('MAX_META_CONTEXT_CHARS','100000'))
 app=Flask(__name__,static_folder='static',static_url_path='/static')
 _SECRET_FILE=DATA/'session_secret'
 def _load_secret():
@@ -100,7 +102,7 @@ def meta_chat_context(current_cid):
             ms=json.loads(r['messages']);txt='\n'.join(str(m.get('content','')) for m in ms[-6:] if m.get('role') in ('user','assistant'))
             if txt:chunks.append('CHAT: '+r['title']+'\n'+txt[:12000])
         except Exception:pass
-    return '\n\n'.join(chunks)[:250000] if chunks else '(Другие чаты недоступны или пусты)'
+    return '\n\n'.join(chunks)[:MAX_META_CONTEXT_CHARS] if chunks else '(Другие чаты недоступны или пусты)'
 
 def library_text():
     root=(LIBRARY/str(session['uid'])).resolve();root.mkdir(parents=True,exist_ok=True);out=[]
@@ -108,7 +110,7 @@ def library_text():
         if p.is_file() and p.suffix.lower() in {'.txt','.md','.markdown','.json','.yaml','.yml','.csv','.tsv','.py','.js','.ts','.html','.css','.xml','.sql'}:
             try:out.append({'path':str(p.relative_to(root)),'text':p.read_text(encoding='utf-8',errors='replace')[:120000]})
             except OSError:pass
-    return source_context(out)[:800000] if out else '(Библиотека пуста)'
+    return source_context(out)[:MAX_LIBRARY_CONTEXT_CHARS] if out else '(Библиотека пуста)'
 
 def files_out(paths,cid=None):
  out=[]
