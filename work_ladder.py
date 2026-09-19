@@ -79,7 +79,7 @@ def parse_router_response(raw,tasks):
 
 def route_tasks(router_call,tasks,request_text,has_images=False):
     lines=["TASK %d: %s"%(i,json.dumps(task,ensure_ascii=False)) for i,task in enumerate(tasks,1)]
-    prompt=("Ты модель-роутер Work Mode. Не выполняй задачи. Для каждой задачи выбери минимально достаточный tier: weak, medium, smart или multimodal. multimodal нужен только если задаче нужно читать изображения. Сложное рассуждение, код и строгий синтез требуют smart; обычная работа medium; простая механика weak. Верни только JSON вида {"assignments":[{"task":1,"tier":"medium","reason":"..."}]}.\nЗапрос:\n"+str(request_text)+"\n"+("\nЕсть изображения. Назначай multimodal только задачам, которым они нужны.\n" if has_images else "")+"\n".join(lines))
+    prompt=("Ты модель-роутер Work Mode. Не выполняй задачи. Для каждой задачи выбери минимально достаточный tier: weak, medium, smart или multimodal. multimodal нужен только если задаче нужно читать изображения. Сложное рассуждение, код и строгий синтез требуют smart; обычная работа medium; простая механика weak. Верни только JSON вида " + '{"assignments":[{"task":1,"tier":"medium","reason":"..."}]}' + ".\nЗапрос:\n"+str(request_text)+"\n"+("\nЕсть изображения. Назначай multimodal только задачам, которым они нужны.\n" if has_images else "")+"\n".join(lines))
     raw=router_call([{"role":"system","content":prompt},{"role":"user","content":"Назначь tier всем задачам."}])
     return parse_router_response(raw,tasks),raw
 
