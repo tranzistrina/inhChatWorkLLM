@@ -88,10 +88,13 @@ def choose_task_role(task,settings,image_required=False):
     tier=str(task.get("tier") or "medium").lower()
     return tier if tier in TEXT_TIERS else "medium"
 
-def execute_with_fallback(db,user_id,primary,fallback_ids,call):
+def execute_with_fallback(db,user_id,primary,fallback_ids,call,required_kind=None):
     candidates=[];seen=set();errors=[]
     for row in [primary]+[_provider_row(db,user_id,x) for x in (fallback_ids or [])]:
-        if not row or int(row["id"]) in seen or str(row["kind"] or "text")=="image": continue
+        if not row or int(row["id"]) in seen: continue
+        kind=str(row["kind"] or "text")
+        if required_kind and kind!=required_kind: continue
+        if not required_kind and kind=="image": continue
         seen.add(int(row["id"]));candidates.append(row)
     for row in candidates:
         try: return call(row),{"provider":provider_label(row),"attempts":len(errors)+1,"fallback_used":bool(errors),"errors":errors}
