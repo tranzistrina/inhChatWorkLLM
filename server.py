@@ -272,18 +272,25 @@ def chats():
 @app.post('/api/chats')
 @auth
 def new_chat():
- d=request.json or {};cid=str(uuid.uuid4());title=d.get('title','Новый чат');temporary=1 if bool(d.get('temporary')) else 0;meta=1 if bool(d.get('meta_analysis')) else 0;image_enabled=1 if bool(d.get('image_generation_enabled')) else 0;image_provider_id=d.get('image_provider_id')
- with db() as c:c.execute('INSERT INTO chats(id,user_id,title,messages,provider_id,meta_analysis,temporary,image_generation_enabled,image_provider_id) VALUES(?,?,?,?,?,?,?,?,?)',(cid,session['uid'],title,'[]',d.get('provider_id'),meta,temporary,image_enabled,image_provider_id))
+ d=request.json or {};cid=str(uuid.uuid4());title=d.get('title','Новый чат');temporary=1 if bool(d.get('temporary')) else 0;meta=1 if bool(d.get('meta_analysis')) else 0;image_enabled=1 if bool(d.get('image_generation_enabled')) else 0;image_provider_id=d.get('image_provider_id');chat_provider_id=d.get('provider_id')
+ with db() as c:
+  if chat_provider_id is not None and not c.execute('SELECT id FROM providers WHERE id=? AND user_id=? AND kind!=?',(int(chat_provider_id),session['uid'],'image')).fetchone():return jsonify(error='Провайдер чата не найден'),400
+  if image_provider_id is not None and not c.execute('SELECT id FROM providers WHERE id=? AND user_id=? AND kind=?',(int(image_provider_id),session['uid'],'image')).fetchone():return jsonify(error='Провайдер генерации изображений не найден'),400
+  c.execute('INSERT INTO chats(id,user_id,title,messages,provider_id,meta_analysis,temporary,image_generation_enabled,image_provider_id) VALUES(?,?,?,?,?,?,?,?,?)',(cid,session['uid'],title,'[]',chat_provider_id,meta,temporary,image_enabled,image_provider_id))
  return jsonify(id=cid,title=title)
 @app.patch('/api/chats/<cid>')
 @auth
 def edit_chat(cid):
     d=request.json or {}
     title=d.get('title')
-    archived=d.get('archived');meta=d.get('meta_analysis');temporary=d.get('temporary');image_enabled=d.get('image_generation_enabled');image_provider_id=d.get('image_provider_id')
+    archived=d.get('archived');meta=d.get('meta_analysis');temporary=d.get('temporary');image_enabled=d.get('image_generation_enabled');image_provider_id=d.get('image_provider_id');chat_provider_id=d.get('provider_id')
     with db() as c:
         r=c.execute('SELECT id FROM chats WHERE id=? AND user_id=?',(cid,session['uid'])).fetchone()
         if not r:return jsonify(error='not_found'),404
+        if chat_provider_id is not None:
+            cp=c.execute('SELECT id FROM providers WHERE id=? AND user_id=? AND kind!=?',(int(chat_provider_id),session['uid'],'image')).fetchone()
+            if not cp:return jsonify(error='Провайдер чата не найден'),400
+            c.execute('UPDATE chats SET provider_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?',(int(chat_provider_id),cid,session['uid']))
         if title is not None:
             title=str(title).strip()[:120]
             if not title:return jsonify(error='Название не может быть пустым'),400
