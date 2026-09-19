@@ -6,6 +6,7 @@ from workmode import ingest_uploads, source_context, parse_plan, create_archive
 from report_builder import build_report_files, strict_system_prompt
 from media_service import generate_image, image_paths_under, multimodal_content
 from server import LIBRARY
+from work_ladder import init_db as init_ladder_db, get_settings as get_ladder_settings, save_settings as save_ladder_settings, provider_for_role as ladder_provider_for_role, route_tasks as ladder_route_tasks, choose_task_role as ladder_choose_role, execute_with_fallback as ladder_execute, provider_label as ladder_provider_label
 
 CHAT_ROOT = WORK / 'chats'; CHAT_ROOT.mkdir(parents=True, exist_ok=True)
 TEXT_EXT={'.txt','.md','.markdown','.rst','.py','.js','.ts','.tsx','.jsx','.json','.yaml','.yml','.toml','.ini','.cfg','.conf','.env','.log','.csv','.tsv','.html','.htm','.css','.scss','.xml','.sql','.sh','.bash','.zsh','.bat','.ps1','.java','.kt','.kts','.c','.h','.cpp','.hpp','.cs','.go','.rs','.rb','.php','.swift','.vue','.svelte','.tex'}
@@ -18,6 +19,7 @@ with db() as c:
     if 'max_tasks' not in cols: c.execute('ALTER TABLE work_runs ADD COLUMN max_tasks INTEGER DEFAULT 12')
     if 'recommended_tasks' not in cols: c.execute('ALTER TABLE work_runs ADD COLUMN recommended_tasks INTEGER DEFAULT 8')
     c.execute('''CREATE TABLE IF NOT EXISTS work_events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL,chat_id TEXT NOT NULL,user_id INTEGER NOT NULL,kind TEXT NOT NULL,message TEXT NOT NULL,data TEXT DEFAULT '{}',created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+init_ladder_db(db)
 
 def meta_chat_context():
     with db() as c:
@@ -160,6 +162,27 @@ def materialize_task(cid,iteration,raw):
         except (ValueError,OSError,zipfile.BadZipFile):continue
     return made
 
+@app.get('/api/work/ladder')
+@auth
+def work_ladder_get():
+    return jsonify(get_ladder_settings(db, session['uid']))
+
+@app.put('/api/work/ladder')
+@auth
+def work_ladder_put():
+    try:
+        data=save_ladder_settings(db, session['uid'], request.json or {})
+        return jsonify(data)
+    except ValueError as e:
+        return jsonify(error=str(e)),400
+
+def ladder_settings_for_run():
+    return get_ladder_settings(db, session['uid'])
+
+def ladder_call(settings, role, messages, required_kind=None):
+    primary=ladder_provider_for_role(db,session['uid'],settings,role)
+    return ladder_execute(db,session['uid'],primary,settings.get('fallback_provider_ids'),lambda row: llm(row,messages),required_kind=required_kind)
+
 @app.post('/api/work/intake/<cid>')
 @auth
 def intake(cid):
@@ -193,11 +216,27 @@ def work_status(cid):
 def plan(cid):
     d=request.json or {};p=provider(int(d.get('provider_id') or 0));r=run_row(cid)
     if not p or not r:return jsonify(error='Рабочая сессия или провайдер не найдены'),400
-    src=json.loads(r['source_files']);meta=bool(r['meta_analysis']) if 'meta_analysis' in r.keys() else False;max_tasks=int(r['max_tasks']) if 'max_tasks' in r.keys() else 12;recommended_tasks=int(r['recommended_tasks']) if 'recommended_tasks' in r.keys() else 8;emit(r['id'],cid,'plan_start','Составляю план задач')
+    src=json.loads(r['source_files']);meta=bool(r['meta_analysis']) if 'meta_analysis' in r.keys() else False;max_tasks=int(r['max_tasks']) if 'max_tasks' in r.keys() else 12;recommended_tasks=int(r['recommended_tasks']) if 'recommended_tasks' in r.keys() else 8;ladder=ladder_settings_for_run();emit(r['id'],cid,'plan_start','Составляю план задач')
     try:
-        raw=llm(p,[{'role':'system','content':f'Planning stage. Return ONLY a JSON array with 1-{max_tasks} sequential tasks. Prefer approximately {min(recommended_tasks,max_tasks)} tasks unless the source clearly requires fewer or the maximum limit makes that impossible. Each object has title and description. Do not execute anything.'},{'role':'user','content':r['request']+'\n\nSHARED LIBRARY:\n'+shared_library_context()+'\n\nCROSS-CHAT META ANALYSIS:\n'+(meta_chat_context() if meta else '(Выключен. Другие чаты недоступны.)')+'\n\nFILES:\n'+context_for_task(cid,r['iteration'],src)}]);tasks=parse_plan(raw,max_tasks)
+        messages=[{'role':'system','content':f'Planning stage. Return ONLY a JSON array with 1-{max_tasks} sequential tasks. Prefer approximately {min(recommended_tasks,max_tasks)} tasks unless the source clearly requires fewer or the maximum limit makes that impossible. Each object has title and description. Do not execute anything.'},{'role':'user','content':r['request']+'\n\nSHARED LIBRARY:\n'+shared_library_context()+'\n\nCROSS-CHAT META ANALYSIS:\n'+(meta_chat_context() if meta else '(Выключен. Другие чаты недоступны.)')+'\n\nFILES:\n'+context_for_task(cid,r['iteration'],src)}]
+        if ladder.get('enabled'):
+            raw,meta_exec=ladder_call(ladder,'smart',messages)
+            p_used=meta_exec['provider']
+            tasks=parse_plan(raw,max_tasks)
+            image_inputs=bool([x for x in src if Path(x['path']).suffix.lower() in {'.png','.jpg','.jpeg','.webp','.gif'}])
+            try:
+                assignments,router_raw=ladder_route_tasks(lambda msgs: ladder_call(ladder,'router',msgs)[0],tasks,r['request'],image_inputs)
+            except Exception as router_error:
+                assignments={};router_raw='';emit(r['id'],cid,'ladder_router_fallback','Роутер недоступен, применяю безопасный средний уровень',{'error':str(router_error)[:1000]})
+            for i,task_item in enumerate(tasks):
+                route=assignments.get(i,{'tier':'medium','reason':'Роутер не дал валидного назначения'})
+                task_item['tier']=route['tier'];task_item['route_reason']=route['reason']
+            emit(r['id'],cid,'ladder_routed','Лестница распределила модели',{'planner':p_used,'router':ladder_provider_label(ladder_provider_for_role(db,session['uid'],ladder,'router')),'assignments':[{'index':i,'tier':t.get('tier'),'reason':t.get('route_reason')} for i,t in enumerate(tasks)]})
+            plan_text=raw
+        else:
+            raw=llm(p,messages);tasks=parse_plan(raw,max_tasks);plan_text=raw
         with db() as c:c.execute('UPDATE work_runs SET plan=?,results=? WHERE id=?',(json.dumps(tasks,ensure_ascii=False),'[]',r['id']))
-        emit(r['id'],cid,'plan_done',f'План готов: {len(tasks)} задач',{'count':len(tasks)});return jsonify(tasks=tasks,plan_text=raw)
+        emit(r['id'],cid,'plan_done',f'План готов: {len(tasks)} задач',{'count':len(tasks),'ladder':bool(ladder.get('enabled'))});return jsonify(tasks=tasks,plan_text=plan_text)
     except Exception as e:emit(r['id'],cid,'error',str(e));return jsonify(error=str(e)),500
 
 @app.post('/api/work/task/<cid>')
