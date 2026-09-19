@@ -5,6 +5,7 @@ from server import app, db, auth, provider, llm, WORK, DEEPSEEK
 from workmode import ingest_uploads, source_context, parse_plan, create_archive
 from report_builder import build_report_files, strict_system_prompt
 from media_service import generate_image, image_paths_under, multimodal_content
+from action_policy import parse as parse_actions
 from server import LIBRARY
 from work_state import transition, acquire_task, release_task
 from llm_execution import classify_error
@@ -135,6 +136,8 @@ def available_image_paths(cid,iteration):
 
 def materialize_task(cid,iteration,raw):
     root=chat_root(cid);current=iteration_root(cid,iteration);made=[]
+    # Validate all model-generated side effects before executing any of them.
+    parse_actions(raw)
     if len(all_chat_files(cid,iteration)) >= MAX_WORK_FILES:
         raise RuntimeError('Достигнут лимит файлов рабочего запуска')
     image_enabled,image_provider_id=chat_image_settings(cid)
