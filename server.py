@@ -168,6 +168,7 @@ def add_provider():
  except ProviderConfigError as e:return jsonify(error=str(e)),400
  model=str(d.get('model','')).strip()
  kind=str(d.get('kind','text')).strip().lower()
+ if kind=='openai':kind='text'
  if kind not in {'text','multimodal','image'}:return jsonify(error='Неизвестный тип модели'),400
  if not name or not model:return jsonify(error='Заполните название, Base URL и модель'),400
  with db() as c:
@@ -185,6 +186,7 @@ def edit_provider(pid):
     except ProviderConfigError as e:return jsonify(error=str(e)),400
     model=str(d.get('model','')).strip()
     kind=str(d.get('kind','text')).strip().lower()
+    if kind=='openai':kind='text'
     if kind not in {'text','multimodal','image'}:return jsonify(error='Неизвестный тип модели'),400
     if not name or not model:return jsonify(error='Заполните название, Base URL и модель'),400
     with db() as c:
@@ -200,7 +202,9 @@ def edit_provider(pid):
 @app.delete('/api/providers/<int:pid>')
 @auth
 def del_provider(pid):
- with db() as c:c.execute('DELETE FROM providers WHERE id=? AND user_id=?',(pid,session['uid']))
+ with db() as c:
+  c.execute('UPDATE chats SET image_generation_enabled=0,image_provider_id=NULL WHERE image_provider_id=? AND user_id=?',(pid,session['uid']))
+  c.execute('DELETE FROM providers WHERE id=? AND user_id=?',(pid,session['uid']))
  return jsonify(ok=True)
 
 @app.get('/api/library')
