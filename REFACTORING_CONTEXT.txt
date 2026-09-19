@@ -2076,3 +2076,13 @@ tests/test_work_ladder.py
 Проверка:
 python -m unittest discover -s tests -v
 python -m py_compile server.py provider_service.py workmode.py work_routes.py work_recovery.py llm_retry.py run_server.py report_builder.py work_ladder.py
+
+Дополнение по стабильности
+--------------------------
+При создании новой Work Mode итерации конфигурация лестницы сериализуется
+в work_runs.ladder_settings. Поэтому изменение глобальных настроек лестницы
+посреди уже выполняющегося запуска не меняет маршрутизацию его следующих задач.
+
+Fallback также срабатывает на пустой ответ модели, а не только на HTTP/transport
+исключение. Количество попыток ограничено длиной пользовательского fallback
+списка.
