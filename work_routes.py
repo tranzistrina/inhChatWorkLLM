@@ -170,7 +170,10 @@ def intake(cid):
         n=c.execute('SELECT COALESCE(MAX(iteration),0) n FROM work_runs WHERE chat_id=? AND user_id=?',(cid,session['uid'])).fetchone()['n']+1
     rid=str(uuid.uuid4());dest=iteration_root(cid,n)
     try:
-        source,count,total=ingest_uploads(files,dest);source=[{'path':'iterations/'+str(n)+'/'+x['path'],'text':x['text']} for x in source]
+        source,count,total=ingest_uploads(files,dest)
+        uploaded_images=[x for x in dest.rglob('*') if x.is_file() and x.suffix.lower() in {'.png','.jpg','.jpeg','.webp','.gif'}]
+        if uploaded_images and p['kind']!='multimodal':raise ValueError('В Work Mode для работы с изображениями выберите мультимодальную модель')
+        source=[{'path':'iterations/'+str(n)+'/'+x['path'],'text':x['text']} for x in source]
         with db() as c:c.execute('INSERT INTO work_runs(id,user_id,chat_id,request,source_files,plan,results,iteration,strict_formatting,allow_invention,max_tasks,recommended_tasks) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(rid,session['uid'],cid,text,json.dumps(source,ensure_ascii=False),'[]','[]',n,1 if strict_formatting else 0,1 if allow_invention else 0,max_tasks,recommended_tasks))
         emit(rid,cid,'intake','Материалы загружены',{'iteration':n,'files':count,'bytes':total})
         return jsonify(run_id=rid,iteration=n,files_count=count,bytes=total,source=[{'path':x['path'],'size':len(x['text'])} for x in source])
@@ -205,7 +208,7 @@ def task(cid):
     tasks=json.loads(r['plan']);results=json.loads(r['results'])
     if idx<0 or idx>=len(tasks):return jsonify(error='Неверный номер задачи'),400
     src=json.loads(r['source_files']);meta=bool(r['meta_analysis']) if 'meta_analysis' in r.keys() else False;previous='\n\n'.join(f'TASK {x["index"]+1}:\n{x["result"]}' for x in results);available='\n'.join('- '+x['path'] for x in all_chat_files(cid,r['iteration']))
-    image_enabled,image_provider_id=chat_image_settings(cid);image_paths=available_image_paths(cid,r['iteration']) if image_enabled and p['kind']=='multimodal' else [];task_text=f'Original request:\n{r["request"]}\n\nAssigned task:\n{json.dumps(tasks[idx],ensure_ascii=False)}\n\nAVAILABLE FILES:\n{available}\n\nSOURCE TEXT:\n{context_for_task(cid,r["iteration"],src)}\n\nPREVIOUS TASK RESULTS:\n{previous}';prompt=[{'role':'system','content':'''Execution stage. Execute ONLY the assigned task. This chat is isolated. You can read any AVAILABLE FILE from this chat, including previous iterations. You can copy a previous file into the current iteration.
+    image_enabled,image_provider_id=chat_image_settings(cid);image_paths=available_image_paths(cid,r['iteration']) if image_enabled and p['kind']=='multimodal' else [];task_text=f'IMAGE GENERATION ENABLED: {"yes" if image_enabled and image_provider_id else "no"}\n\n'+f'Original request:\n{r["request"]}\n\nAssigned task:\n{json.dumps(tasks[idx],ensure_ascii=False)}\n\nAVAILABLE FILES:\n{available}\n\nSOURCE TEXT:\n{context_for_task(cid,r["iteration"],src)}\n\nPREVIOUS TASK RESULTS:\n{previous}';prompt=[{'role':'system','content':'''Execution stage. Execute ONLY the assigned task. This chat is isolated. You can read any AVAILABLE FILE from this chat, including previous iterations. You can copy a previous file into the current iteration.
 Create text artifacts with FILE:path followed by full content. Paths after FILE are relative to the CURRENT iteration.
 Copy with COPY_FROM: iterations/N/path => destination/path.
 Create a ZIP with ARCHIVE: name.zip followed by FILES: path1, path2. FILES may reference any iteration in this chat.
