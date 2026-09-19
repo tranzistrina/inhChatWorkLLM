@@ -57,7 +57,7 @@ def multimodal_content(text, image_paths):
     for path in image_paths or []:
         try:
             data_url = image_data_url(path)
-        except OSError:
+        except (OSError, ValueError):
             continue
         if data_url:
             content.append({"type": "image_url", "image_url": {"url": data_url, "detail": "auto"}})
