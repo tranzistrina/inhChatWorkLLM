@@ -187,6 +187,7 @@ def ladder_call(settings, role, messages, required_kind=None):
 @auth
 def intake(cid):
     pid=int(request.form.get('provider_id') or 0);p=provider(pid);text=request.form.get('content','').strip();files=request.files.getlist('files');strict_formatting=request.form.get('strict_formatting','0').lower() in ('1','true','yes','on');allow_invention=request.form.get('allow_invention','0').lower() in ('1','true','yes','on');max_tasks=task_count(request.form.get('max_tasks'),12);recommended_tasks=task_count(request.form.get('recommended_tasks'),8)
+    ladder=ladder_settings_for_run()
     if not p:return jsonify(error='Выберите провайдера'),400
     with db() as c:
         if not c.execute('SELECT id FROM chats WHERE id=? AND user_id=?',(cid,session['uid'])).fetchone():return jsonify(error='not_found'),404
@@ -195,7 +196,7 @@ def intake(cid):
     try:
         source,count,total=ingest_uploads(files,dest)
         uploaded_images=[x for x in dest.rglob('*') if x.is_file() and x.suffix.lower() in {'.png','.jpg','.jpeg','.webp','.gif'}]
-        if uploaded_images and p['kind']!='multimodal':raise ValueError('В Work Mode для работы с изображениями выберите мультимодальную модель')
+        if uploaded_images and p['kind']!='multimodal' and not (ladder.get('enabled') and ladder.get('multimodal_provider_id')):raise ValueError('Для изображений настройте мультимодальную модель в лестнице или выберите мультимодальную модель вручную')
         source=[{'path':'iterations/'+str(n)+'/'+x['path'],'text':x['text']} for x in source]
         with db() as c:c.execute('INSERT INTO work_runs(id,user_id,chat_id,request,source_files,plan,results,iteration,strict_formatting,allow_invention,max_tasks,recommended_tasks) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(rid,session['uid'],cid,text,json.dumps(source,ensure_ascii=False),'[]','[]',n,1 if strict_formatting else 0,1 if allow_invention else 0,max_tasks,recommended_tasks))
         emit(rid,cid,'intake','Материалы загружены',{'iteration':n,'files':count,'bytes':total})
@@ -223,7 +224,7 @@ def plan(cid):
             raw,meta_exec=ladder_call(ladder,'smart',messages)
             p_used=meta_exec['provider']
             tasks=parse_plan(raw,max_tasks)
-            image_inputs=bool([x for x in src if Path(x['path']).suffix.lower() in {'.png','.jpg','.jpeg','.webp','.gif'}])
+            image_inputs=bool(available_image_paths(cid,r['iteration']))
             try:
                 assignments,router_raw=ladder_route_tasks(lambda msgs: ladder_call(ladder,'router',msgs)[0],tasks,r['request'],image_inputs)
             except Exception as router_error:
