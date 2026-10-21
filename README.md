@@ -1,5 +1,7 @@
 # inhCHAT
 
+> **Linux:** см. [README_LINUX.md](README_LINUX.md) и используйте `bash setup-linux.sh` / `bash start-linux.sh` в ветке `linux`. Приведённая ниже инструкция `setup.sh` / `start.sh` предназначена для macOS.
+
 Локальный веб-клиент для LLM с обычным чатом и автономным **«Режимом работы»**.
 
 ## Что есть

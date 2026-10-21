@@ -1,0 +1,37 @@
+name: Linux smoke test
+
+on:
+  push:
+    branches: [linux]
+  pull_request:
+    branches: [linux]
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Check shell syntax
+        run: bash -n setup-linux.sh start-linux.sh
+      - name: Install without optional DeepSeek
+        run: SKIP_DEEPSEEK=1 bash setup-linux.sh
+      - name: Python unit tests
+        run: .venv/bin/python -m unittest discover -s tests
+      - name: Start app and check API
+        shell: bash
+        run: |
+          bash start-linux.sh > /tmp/inhchat-linux.log 2>&1 &
+          app_pid=$!
+          trap 'kill "$app_pid" 2>/dev/null || true; wait "$app_pid" 2>/dev/null || true; cat /tmp/inhchat-linux.log' EXIT
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:6767/api/me -o /tmp/inhchat-api-me.json; then
+              .venv/bin/python -c 'import json; assert json.load(open("/tmp/inhchat-api-me.json")) == {"user": None}'
+              exit 0
+            fi
+            if ! kill -0 "$app_pid" 2>/dev/null; then exit 1; fi
+            sleep 1
+          done
+          exit 1
