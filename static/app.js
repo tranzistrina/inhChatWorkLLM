@@ -44,18 +44,28 @@ async function streamApi(url, options, onDelta) {
 }
 
 function streamingBubble(token){
- let element=null;
+ let element=null,latest='',scheduled=false;
+ const paint=()=>{
+  scheduled=false;
+  if(token!==viewToken||!element||!element.isConnected)return;
+  const body=element.querySelector('.message-text');
+  if(body){
+   // Avoid parsing the complete Markdown after every token. Format once on done.
+   body.style.whiteSpace='pre-wrap';
+   body.textContent=latest;
+  }
+  const box=$('#messages');box.scrollTop=box.scrollHeight;
+ };
  return {
   update(content){
    if(token!==viewToken)return;
+   latest=content;
    if(!element){
     removeTyping();
     addLocal({role:'assistant',content:content||' '});
     element=$('#messages').lastElementChild;
    }
-   const body=element.querySelector('.message-text');
-   if(body)body.innerHTML=renderContent(content,[]);
-   const box=$('#messages');box.scrollTop=box.scrollHeight;
+   if(!scheduled){scheduled=true;requestAnimationFrame(paint)}
   },
   finish(content,files=[]){
    if(token!==viewToken)return;
@@ -65,7 +75,6 @@ function streamingBubble(token){
   }
  };
 }
-
 async function boot(){const m=await api('/api/me');if(!m.user){$('#auth').classList.remove('hidden');return}await api('/api/chats/cleanup-temporary',{method:'POST'}).catch(()=>{});$('#app').classList.remove('hidden');await loadProviders();await loadChats();await refreshWorkspace()}
 $('#authSubmit').onclick=async()=>{try{await api('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:$('#username').value,password:$('#password').value})});$('#authError').textContent='';$('#auth').classList.add('hidden');$('#app').classList.remove('hidden');await loadProviders();await loadChats();await refreshWorkspace()}catch(e){$('#authError').textContent=e.message}};
 async function loadProviders(preferredId=null){
