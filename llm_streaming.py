@@ -56,7 +56,7 @@ def stream_completion(provider, messages, transport=requests):
                     yield value
                 return
 
-            for raw in response.iter_lines():
+            for raw in response.iter_lines(chunk_size=1):
                 if not raw:
                     continue
                 line = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
