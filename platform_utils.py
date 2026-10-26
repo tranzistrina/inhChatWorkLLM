@@ -2,6 +2,7 @@
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -33,3 +34,13 @@ def start_deepseek_auth(root):
             **detached_flags(),
         )
     return process.pid
+
+
+def configure_console():
+    """Avoid UnicodeEncodeError when Windows stdout uses cp1252/cp866."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+            except (OSError, ValueError):
+                pass
