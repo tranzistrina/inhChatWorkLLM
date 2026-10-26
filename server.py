@@ -1,10 +1,11 @@
 import os,json,uuid,sqlite3,subprocess
 from pathlib import Path
-from flask import Flask,request,jsonify,session,send_from_directory,send_file
+from flask import Flask,request,jsonify,session,send_from_directory,send_file,Response,stream_with_context
 from werkzeug.security import generate_password_hash,check_password_hash
 from dotenv import load_dotenv
 from workmode import ingest_uploads,source_context,parse_plan
 from provider_service import ProviderConfigError, auth_headers, candidate_base_urls, discover_models, normalize_base_url, endpoint
+from llm_streaming import stream_completion, ndjson
 load_dotenv()
 ROOT=Path(__file__).resolve().parent;DATA=ROOT/'data';DATA.mkdir(exist_ok=True);WORK=ROOT/'workspace';WORK.mkdir(exist_ok=True);UPLOADS=WORK/'uploads';UPLOADS.mkdir(exist_ok=True);LIBRARY=WORK/'library';LIBRARY.mkdir(exist_ok=True);DB=DATA/'inhchat.db';USERS=ROOT/'users.json';PORT=int(os.getenv('PORT','6767'));DEEPSEEK=os.getenv('DEEPSEEK_BASE_URL','http://127.0.0.1:9655/v1')
 app=Flask(__name__,static_folder='static',static_url_path='/static');app.secret_key=os.getenv('APP_SECRET_KEY','change-me-in-.env');app.config['MAX_CONTENT_LENGTH']=32*1024*1024
@@ -280,32 +281,103 @@ def save_chat(cid,items,title,pid):
  with db() as c:
   r=c.execute('SELECT * FROM chats WHERE id=? AND user_id=?',(cid,session['uid'])).fetchone();m=json.loads(r['messages']);m.extend(items);c.execute('UPDATE chats SET title=?,messages=?,provider_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?',(title,json.dumps(m,ensure_ascii=False),pid,cid))
 
+def store_chat_message(cid, user_id, content, answer, provider_id):
+    """Append at commit time so concurrent requests do not overwrite old history."""
+    with db() as connection:
+        row = connection.execute(
+            'SELECT title,messages FROM chats WHERE id=? AND user_id=?',
+            (cid, user_id),
+        ).fetchone()
+        if not row:
+            raise RuntimeError('Чат был удалён до завершения генерации')
+        history = json.loads(row['messages'])
+        history.extend([
+            {'role': 'user', 'content': content},
+            {'role': 'assistant', 'content': answer},
+        ])
+        title = content[:48] if row['title'] == 'Новый чат' else row['title']
+        connection.execute(
+            'UPDATE chats SET title=?,messages=?,provider_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?',
+            (title, json.dumps(history, ensure_ascii=False), provider_id, cid, user_id),
+        )
+    return title
+
+
 @app.post('/api/chats/<cid>/message')
 @auth
 def message(cid):
-    with db() as c:
-        chat=c.execute('SELECT * FROM chats WHERE id=? AND user_id=?',(cid,session['uid'])).fetchone()
-    if not chat:return jsonify(error='not_found'),404
-    content=request.form.get('content','').strip()
-    pid=request.form.get('provider_id') or chat['provider_id']
-    p=provider(int(pid)) if pid else None
-    if not content:return jsonify(error='Пустое сообщение'),400
-    if not p:return jsonify(error='Провайдер не выбран'),400
-    uploads=request.files.getlist('files')
-    source=[]
+    with db() as connection:
+        chat = connection.execute(
+            'SELECT * FROM chats WHERE id=? AND user_id=?',
+            (cid, session['uid']),
+        ).fetchone()
+    if not chat:
+        return jsonify(error='not_found'), 404
+    content = request.form.get('content', '').strip()
+    pid = request.form.get('provider_id') or chat['provider_id']
+    p = provider(int(pid)) if pid else None
+    if not content:
+        return jsonify(error='Пустое сообщение'), 400
+    if not p:
+        return jsonify(error='Провайдер не выбран'), 400
+    uploads = request.files.getlist('files')
+    source = []
     if uploads:
-        dest=UPLOADS/cid
-        try:source,_,_=ingest_uploads(uploads,dest)
-        except Exception as e:return jsonify(error=str(e)),400
-    history=json.loads(chat['messages'])
-    messages=[{'role':'system','content':'Ты полезный ассистент. Отвечай по существу и используй доступные материалы. Общая библиотека файлов доступна между чатами. Используй её только когда это нужно.\\n\\nОБЩАЯ БИБЛИОТЕКА:\\n'+library_text()}]
-    messages += [{'role':m['role'],'content':m.get('content','')} for m in history[-20:] if m.get('role') in ('user','assistant')]
-    if chat['meta_analysis']:messages.append({'role':'system','content':'МЕТААНАЛИЗ ВКЛЮЧЕН. Контекст других чатов пользователя:\n\n'+meta_chat_context(cid)})
-    if source:messages.append({'role':'user','content':source_context(source)})
-    messages.append({'role':'user','content':content})
-    try:answer=llm(p,messages)
-    except Exception as e:return jsonify(error=f'LLM: {e}'),502
-    title=chat['title']
-    if title=='Новый чат':title=content[:48] or title
-    save_chat(cid,[{'role':'user','content':content},{'role':'assistant','content':answer}],title,int(pid))
-    return jsonify(answer=answer,title=title,files=[])
+        try:
+            source, _, _ = ingest_uploads(uploads, UPLOADS / cid)
+        except Exception as exc:
+            return jsonify(error=str(exc)), 400
+
+    history = json.loads(chat['messages'])
+    messages = [{
+        'role': 'system',
+        'content': 'Ты полезный ассистент. Отвечай по существу и используй доступные материалы. '
+                   'Общая библиотека файлов доступна между чатами. Используй её только когда это нужно.\n\n'
+                   'ОБЩАЯ БИБЛИОТЕКА:\n' + library_text(),
+    }]
+    messages.extend(
+        {'role': m['role'], 'content': m.get('content', '')}
+        for m in history[-20:] if m.get('role') in ('user', 'assistant')
+    )
+    if chat['meta_analysis']:
+        messages.append({
+            'role': 'system',
+            'content': 'МЕТААНАЛИЗ ВКЛЮЧЕН. Контекст других чатов пользователя:\n\n'
+                       + meta_chat_context(cid),
+        })
+    if source:
+        messages.append({'role': 'user', 'content': source_context(source)})
+    messages.append({'role': 'user', 'content': content})
+    user_id = session['uid']
+    provider_id = p['id']
+
+    if request.args.get('stream') == '1':
+        @stream_with_context
+        def generate():
+            chunks = []
+            try:
+                for delta in stream_completion(p, messages):
+                    chunks.append(delta)
+                    yield ndjson('delta', text=delta)
+                answer = ''.join(chunks)
+                if not answer.strip():
+                    raise RuntimeError('API вернул пустой ответ')
+                title = store_chat_message(cid, user_id, content, answer, provider_id)
+                yield ndjson('done', title=title, files=[])
+            except Exception as exc:
+                # No partial assistant message is committed on upstream failure.
+                yield ndjson('error', error=str(exc))
+
+        return Response(
+            generate(),
+            mimetype='application/x-ndjson',
+            headers={'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no'},
+        )
+
+    # Keep the old JSON HTTP contract for existing clients.
+    try:
+        answer = llm(p, messages)
+        title = store_chat_message(cid, user_id, content, answer, provider_id)
+    except Exception as exc:
+        return jsonify(error='LLM: ' + str(exc)), 502
+    return jsonify(answer=answer, title=title, files=[])

@@ -1,10 +1,12 @@
 import json, re, shutil, uuid, zipfile, subprocess, urllib.parse
 from pathlib import Path
-from flask import request, jsonify, send_file, session
+from flask import request, jsonify, send_file, session, Response, stream_with_context
 from server import app, db, auth, provider, llm, WORK, DEEPSEEK
 from workmode import ingest_uploads, source_context, parse_plan, create_archive
 from report_builder import build_report_files, strict_system_prompt
 from server import LIBRARY
+from llm_streaming import stream_completion, ndjson
+from platform_utils import start_deepseek_auth
 
 CHAT_ROOT = WORK / 'chats'; CHAT_ROOT.mkdir(parents=True, exist_ok=True)
 TEXT_EXT={'.txt','.md','.markdown','.rst','.py','.js','.ts','.tsx','.jsx','.json','.yaml','.yml','.toml','.ini','.cfg','.conf','.env','.log','.csv','.tsv','.html','.htm','.css','.scss','.xml','.sql','.sh','.bash','.zsh','.bat','.ps1','.java','.kt','.kts','.c','.h','.cpp','.hpp','.cs','.go','.rs','.rb','.php','.swift','.vue','.svelte','.tex'}
@@ -191,11 +193,43 @@ Create a ZIP with ARCHIVE: name.zip followed by FILES: path1, path2. FILES may r
 Clone a public GitHub repository with GITHUB: https://github.com/owner/repo => repo_name. Only github.com public repository URLs are allowed.
 Do not perform other tasks.'''.strip()},{'role':'user','content':f'Original request:\n{r["request"]}\n\nAssigned task:\n{json.dumps(tasks[idx],ensure_ascii=False)}\n\nAVAILABLE FILES:\n{available}\n\nSOURCE TEXT:\n{context_for_task(cid,r["iteration"],src)}\n\nPREVIOUS TASK RESULTS:\n{previous}'}]
     emit(r['id'],cid,'task_start',f'Выполняю задачу {idx+1} из {len(tasks)}',{'index':idx})
-    try:raw=llm(p,prompt);made=materialize_task(cid,r['iteration'],raw)
-    except Exception as e:emit(r['id'],cid,'error',str(e),{'index':idx});return jsonify(error=str(e)),500
-    results=[x for x in results if x['index']!=idx];results.append({'index':idx,'result':raw,'files':made})
-    with db() as c:c.execute('UPDATE work_runs SET results=? WHERE id=?',(json.dumps(sorted(results,key=lambda x:x['index']),ensure_ascii=False),r['id']))
-    emit(r['id'],cid,'task_done',f'Задача {idx+1} завершена',{'index':idx,'files':len(made)});return jsonify(result=raw,files=artifact_info(cid,made))
+
+    def finish_task(raw):
+        made=materialize_task(cid,r['iteration'],raw)
+        updated=[x for x in results if x['index']!=idx]
+        updated.append({'index':idx,'result':raw,'files':made})
+        with db() as c:
+            c.execute('UPDATE work_runs SET results=? WHERE id=?',
+                (json.dumps(sorted(updated,key=lambda x:x['index']),ensure_ascii=False),r['id']))
+        emit(r['id'],cid,'task_done',f'Задача {idx+1} завершена',
+             {'index':idx,'files':len(made)})
+        return artifact_info(cid,made)
+
+    if request.args.get('stream')=='1':
+        @stream_with_context
+        def generate():
+            chunks=[]
+            try:
+                for delta in stream_completion(p,prompt):
+                    chunks.append(delta)
+                    yield ndjson('delta',text=delta)
+                raw=''.join(chunks)
+                if not raw.strip():raise RuntimeError('API вернул пустой ответ')
+                files=finish_task(raw)
+                yield ndjson('done',result=raw,files=files)
+            except Exception as exc:
+                emit(r['id'],cid,'error',str(exc),{'index':idx})
+                yield ndjson('error',error=str(exc))
+        return Response(generate(),mimetype='application/x-ndjson',
+                        headers={'Cache-Control':'no-cache, no-transform','X-Accel-Buffering':'no'})
+
+    try:
+        raw=llm(p,prompt)
+        files=finish_task(raw)
+    except Exception as e:
+        emit(r['id'],cid,'error',str(e),{'index':idx})
+        return jsonify(error=str(e)),500
+    return jsonify(result=raw,files=files)
 
 @app.post('/api/work/final/<cid>')
 @auth
@@ -209,6 +243,36 @@ def final(cid):
         prompt=[{'role':'system','content':strict_system_prompt(bool(r['allow_invention']) if 'allow_invention' in r.keys() else False)},{'role':'user','content':r['request']+'\n\nSOURCE FILES:\n'+context_for_task(cid,r['iteration'],src)+'\n\nCOMPLETED TASKS:\n'+work+'\n\nAVAILABLE FILES:\n'+available}]
     else:
         prompt=[{'role':'system','content':'Final synthesis stage. Prepare the final answer from completed task results. Do not invent work. Decide which files, if any, should be attached. Insert a file anywhere in the response with [[ATTACH: path]]. A selected file may be from any previous iteration of this same chat. Attach only files materially useful to the user.'},{'role':'user','content':r['request']+'\n\nSHARED LIBRARY:\n'+shared_library_context()+'\n\nCROSS-CHAT META ANALYSIS:\n'+(meta_chat_context() if meta else '(Выключен. Другие чаты недоступны.)')+'\n\nAVAILABLE FILES:\n'+available+'\n\nSOURCE FILES:\n'+context_for_task(cid,r['iteration'],src)+'\n\nCOMPLETED TASKS:\n'+work}]
+    if request.args.get('stream')=='1' and not strict:
+        @stream_with_context
+        def generate():
+            chunks=[]
+            try:
+                for delta in stream_completion(p,prompt):
+                    chunks.append(delta)
+                    yield ndjson('delta',text=delta)
+                answer=''.join(chunks)
+                if not answer.strip():raise RuntimeError('API вернул пустой ответ')
+                _,attaches,_=parse_directives(answer)
+                valid=[];root=chat_root(cid)
+                for rel in attaches:
+                    try:pth=safe_file(root,rel)
+                    except ValueError:continue
+                    if pth.is_file() and root in pth.parents:valid.append(str(pth.relative_to(root)))
+                files=artifact_info(cid,valid)
+                title=r['request'][:48] or 'Рабочая задача'
+                save_chat(cid,[{'role':'user','content':r['request']},
+                               {'role':'assistant','content':answer,'files':files}],title,p['id'])
+                with db() as c:c.execute('UPDATE work_runs SET final_answer=? WHERE id=?',
+                                         (answer,r['id']))
+                emit(r['id'],cid,'final_done','Готово',{'attachments':len(files)})
+                yield ndjson('done',answer=answer,files=files,title=title)
+            except Exception as exc:
+                emit(r['id'],cid,'error',str(exc))
+                yield ndjson('error',error=str(exc))
+        return Response(generate(),mimetype='application/x-ndjson',
+                        headers={'Cache-Control':'no-cache, no-transform','X-Accel-Buffering':'no'})
+
     try:answer=llm(p,prompt)
     except Exception as e:emit(r['id'],cid,'error',str(e));return jsonify(error=str(e)),500
     if strict:
@@ -252,7 +316,11 @@ def file(cid,rel):
 def deepseek_auth():
     v=Path(__file__).resolve().parent/'.vendor'/'FreeDeepseekAPI'
     if not v.exists():return jsonify(error='FreeDeepseekAPI не установлен'),503
-    log=open(Path(__file__).resolve().parent/'data'/'deepseek-auth.log','a');subprocess.Popen(['npm','run','auth'],cwd=v,stdout=log,stderr=log,start_new_session=True);return jsonify(ok=True,message='Открывается окно Chrome для входа в DeepSeek.')
+    try:
+        start_deepseek_auth(Path(__file__).resolve().parent)
+        return jsonify(ok=True,message='Открывается окно Chrome для входа в DeepSeek.')
+    except (RuntimeError,OSError) as exc:
+        return jsonify(error=str(exc)),503
 
 @app.get('/api/deepseek/status')
 def deepseek_status():

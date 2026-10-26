@@ -1,5 +1,80 @@
 const $=s=>document.querySelector(s);function clampTaskCount(value,fallback){const n=Number.parseInt(String(value??'').trim(),10);return Number.isFinite(n)?Math.max(1,Math.min(30,n)):fallback}let current=null,workMode=false,metaAnalysis=false,temporaryChat=false,strictFormatting=localStorage.getItem('inhchat.strictFormatting')==='1',allowInvention=localStorage.getItem('inhchat.allowInvention')==='1',maxTasks=clampTaskCount(localStorage.getItem('inhchat.maxTasks'),8),recommendedTasks=clampTaskCount(localStorage.getItem('inhchat.recommendedTasks'),8),providers=[],activeProvider=null,workState=null,pendingFiles=[],pollTimer=null,pollRunId=null,lastEvent=0,viewToken=0,collapsed=localStorage.getItem('inhchat.work.collapsed')==='1';
 async function api(url,opt={}){const r=await fetch(url,opt);const d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.error||'Ошибка запроса');return d}
+
+let chatAbortController=null;
+
+// The server emits NDJSON events, each on its own line. Network chunks can split
+// a JSON event in the middle of a multibyte UTF-8 character.
+async function streamApi(url, options, onDelta) {
+ const response=await fetch(url,options);
+ if(!response.ok){
+  const error=await response.json().catch(()=>({}));
+  throw Error(error.error||'Ошибка запроса');
+ }
+ if(!(response.headers.get('Content-Type')||'').includes('application/x-ndjson'))
+  return response.json(); // compatible with pre-stream endpoints
+ if(!response.body)throw Error('Браузер не поддерживает потоковый ответ');
+ const reader=response.body.getReader(),decoder=new TextDecoder();
+ let buffer='',answer='',finished=null;
+ const parseLine=line=>{
+  if(!line.trim())return;
+  let event;
+  try{event=JSON.parse(line)}catch(e){throw Error('Повреждён ответ сервера')}
+  if(event.type==='error')throw Error(event.error||'Ошибка модели');
+  if(event.type==='delta'){answer+=event.text||'';onDelta(answer)}
+  if(event.type==='done')finished=event;
+ };
+ try{
+  while(true){
+   const {done,value}=await reader.read();
+   if(done)break;
+   buffer+=decoder.decode(value,{stream:true});
+   let end;
+   while((end=buffer.indexOf('\n'))!==-1){
+    const line=buffer.slice(0,end);
+    buffer=buffer.slice(end+1);
+    parseLine(line);
+   }
+  }
+  buffer+=decoder.decode();
+  if(buffer.trim())parseLine(buffer);
+  if(!finished)throw Error('Соединение оборвалось до завершения ответа');
+  return {...finished,answer};
+ }finally{reader.releaseLock()}
+}
+
+function streamingBubble(token){
+ let element=null,latest='',scheduled=false;
+ const paint=()=>{
+  scheduled=false;
+  if(token!==viewToken||!element||!element.isConnected)return;
+  const body=element.querySelector('.message-text');
+  if(body){
+   // Avoid parsing the complete Markdown after every token. Format once on done.
+   body.style.whiteSpace='pre-wrap';
+   body.textContent=latest;
+  }
+  const box=$('#messages');box.scrollTop=box.scrollHeight;
+ };
+ return {
+  update(content){
+   if(token!==viewToken)return;
+   latest=content;
+   if(!element){
+    removeTyping();
+    addLocal({role:'assistant',content:content||' '});
+    element=$('#messages').lastElementChild;
+   }
+   if(!scheduled){scheduled=true;requestAnimationFrame(paint)}
+  },
+  finish(content,files=[]){
+   if(token!==viewToken)return;
+   removeTyping();
+   if(element)element.outerHTML=renderMessage({role:'assistant',content,files});
+   else addLocal({role:'assistant',content,files});
+  }
+ };
+}
 async function boot(){const m=await api('/api/me');if(!m.user){$('#auth').classList.remove('hidden');return}await api('/api/chats/cleanup-temporary',{method:'POST'}).catch(()=>{});$('#app').classList.remove('hidden');await loadProviders();await loadChats();await refreshWorkspace()}
 $('#authSubmit').onclick=async()=>{try{await api('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:$('#username').value,password:$('#password').value})});$('#authError').textContent='';$('#auth').classList.add('hidden');$('#app').classList.remove('hidden');await loadProviders();await loadChats();await refreshWorkspace()}catch(e){$('#authError').textContent=e.message}};
 async function loadProviders(preferredId=null){
@@ -64,22 +139,61 @@ window.toggleChatMenu=id=>{document.querySelectorAll('.chat-menu').forEach(x=>{i
 window.renameChat=async id=>{const c=await api('/api/chats/'+id);const title=prompt('Название чата:',c.title);if(title===null)return;await api('/api/chats/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({title})});await loadChats();if(current===id)$('#chatTitle').textContent=title};
 window.archiveChat=async(id,value)=>{await api('/api/chats/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({archived:value})});if(current===id){await loadChats()}else await loadChats()};
 window.deleteChat=async id=>{const c=await api('/api/chats/'+id);if(!confirm('Удалить чат «'+c.title+'»? Все его рабочие файлы и результаты тоже будут удалены.'))return;const was=current===id;await api('/api/chats/'+id,{method:'DELETE'});if(was){current=null;workState=null;hideWorkPanel();lastEvent=0}await loadChats()};
-window.createChat=async()=>{if(current&&temporaryChat){await api('/api/chats/'+current,{method:'DELETE'}).catch(()=>{})}stopPolling();viewToken++;current=null;workState=null;hideWorkPanel();lastEvent=0;const d=await api('/api/chats',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider_id:activeProvider})});await openChat(d.id)};
-window.openChat=async id=>{if(current&&current!==id&&temporaryChat){await api('/api/chats/'+current,{method:'DELETE'}).catch(()=>{});temporaryChat=false}const token=++viewToken;stopPolling();current=id;workState=null;lastEvent=0;pendingFiles=[];renderAttachments();hideWorkPanel();setStatus('Готово');const c=await api('/api/chats/'+id);if(token!==viewToken)return;$('#chatTitle').textContent=c.title;metaAnalysis=!!c.meta_analysis;temporaryChat=!!c.temporary;updateChatToggles();renderMessages(c.messages);await loadChats();if(token!==viewToken)return;await refreshWorkspace();const rec=await api('/api/work/continue/'+id).catch(()=>null);if(token!==viewToken||!rec||!rec.active)return;if(rec.tasks?.length){workState={run_id:rec.run_id,iteration:rec.iteration,plan:rec.tasks,files_count:0};renderWorkPanel();showContinue(rec)}};$('#newChat').onclick=()=>createChat();
+window.createChat=async()=>{chatAbortController?.abort();if(current&&temporaryChat){await api('/api/chats/'+current,{method:'DELETE'}).catch(()=>{})}stopPolling();viewToken++;current=null;workState=null;hideWorkPanel();lastEvent=0;const d=await api('/api/chats',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider_id:activeProvider})});await openChat(d.id)};
+window.openChat=async id=>{chatAbortController?.abort();if(current&&current!==id&&temporaryChat){await api('/api/chats/'+current,{method:'DELETE'}).catch(()=>{});temporaryChat=false}const token=++viewToken;stopPolling();current=id;workState=null;lastEvent=0;pendingFiles=[];renderAttachments();hideWorkPanel();setStatus('Готово');const c=await api('/api/chats/'+id);if(token!==viewToken)return;$('#chatTitle').textContent=c.title;metaAnalysis=!!c.meta_analysis;temporaryChat=!!c.temporary;updateChatToggles();renderMessages(c.messages);await loadChats();if(token!==viewToken)return;await refreshWorkspace();const rec=await api('/api/work/continue/'+id).catch(()=>null);if(token!==viewToken||!rec||!rec.active)return;if(rec.tasks?.length){workState={run_id:rec.run_id,iteration:rec.iteration,plan:rec.tasks,files_count:0};renderWorkPanel();showContinue(rec)}};$('#newChat').onclick=()=>createChat();
 function renderMessages(ms){const box=$('#messages');if(!ms.length){box.innerHTML=welcomeHtml();return}box.innerHTML=ms.map(renderMessage).join('');box.scrollTop=box.scrollHeight}
 function fileCard(f){return '<a class="file-card" href="'+esc(f.url)+'" download><span class="file-icon">↧</span><span><strong>'+esc(f.name)+'</strong><small>'+esc(f.size?formatBytes(f.size):'Файл')+'</small></span></a>'}
 function renderContent(s,files){let text=String(s||''),out='',last=0,re=/\[\[ATTACH:\s*([^\]]+)\]\]/gi,m;while((m=re.exec(text))){out+=formatText(text.slice(last,m.index));const key=m[1].trim(),f=(files||[]).find(x=>(x.path||x.name)===key);if(f)out+=fileCard(f);last=re.lastIndex}return out+formatText(text.slice(last))}
 function renderMessage(m){const files=m.files||[];return '<article class="message '+m.role+'"><div class="message-avatar">'+(m.role==='user'?'Вы':'✦')+'</div><div class="message-body">'+(m.content?'<div class="message-text">'+renderContent(m.content,files)+'</div>':'')+(files.length&&!String(m.content||'').includes('[[ATTACH:')?files.map(fileCard).join(''):'')+'</div></article>'}
 function welcomeHtml(){return `<div class="welcome"><div class="welcome-mark">✦</div><h1>Что будем делать?</h1><p>Обычный чат для быстрых ответов. Режим работы сначала строит план, затем выполняет задачи по одной и собирает результат из файлов.</p><div class="quick-grid"><button onclick="quick('Проанализируй эту задачу и предложи план')"><b>Проанализировать</b><span>Разобрать задачу по шагам</span></button><button onclick="quick('Составь подробный план проекта')"><b>Спланировать</b><span>Сначала задачи, потом выполнение</span></button><button onclick="quick('Создай необходимые файлы и собери результат в архив')"><b>Создать файлы</b><span>Результат можно скачать</span></button></div></div>`}window.quick=t=>{$('#input').value=t;$('#input').focus()};
 $('#modeBtn').onclick=()=>{workMode=!workMode;$('#modeBtn').classList.toggle('active',workMode);$('#modeBtn').textContent=workMode?'✦ Режим работы':'✦ Обычный чат';$('#modeLabel').textContent=workMode?'Планирование → задачи → выполнение → итог':'Обычный запрос к модели · перетащите архив или файлы сюда'};
-const composer=$('#composer');composer.onsubmit=async e=>{e.preventDefault();const text=$('#input').value.trim();if(!text||!current||!activeProvider)return;$('#input').value='';const token=viewToken;const files=[...pendingFiles];addLocal({role:'user',content:text,files:files.map(f=>({name:f.name,size:f.size,url:'#'}))});pendingFiles=[];renderAttachments();$('#send').disabled=true;$('#input').disabled=true;$('#attachBtn').disabled=true;try{workMode?await runWork(text,files,token):await runChat(text,files,token)}catch(e){stopPolling();addLocal({role:'assistant',content:'Ошибка: '+e.message});setStatus('Ошибка');if(workMode)await showContinueOption()}finally{$('#send').disabled=false;$('#input').disabled=false;$('#attachBtn').disabled=false;$('#input').focus()}};
-async function runChat(text,files,token){if(token!==viewToken)return;setStatus('Печатает…');showTyping();setSendLoading(true);const fd=new FormData();fd.append('content',text);fd.append('provider_id',activeProvider);files.forEach(f=>fd.append('files',f));try{const d=await api('/api/chats/'+current+'/message',{method:'POST',body:fd});removeTyping();addLocal({role:'assistant',content:d.answer,files:d.files||[]});$('#chatTitle').textContent=d.title;await loadChats();await refreshWorkspace();setStatus('Готово')}catch(e){removeTyping();throw e}finally{setSendLoading(false)}}
+const composer=$('#composer');composer.onsubmit=async e=>{e.preventDefault();const text=$('#input').value.trim();if(!text||!current||!activeProvider)return;$('#input').value='';const token=viewToken;const files=[...pendingFiles];addLocal({role:'user',content:text,files:files.map(f=>({name:f.name,size:f.size,url:'#'}))});pendingFiles=[];renderAttachments();$('#send').disabled=true;$('#input').disabled=true;$('#attachBtn').disabled=true;try{workMode?await runWork(text,files,token):await runChat(text,files,token)}catch(e){if(e.name==='AbortError')return;stopPolling();addLocal({role:'assistant',content:'Ошибка: '+e.message});setStatus('Ошибка');if(workMode)await showContinueOption()}finally{$('#send').disabled=false;$('#input').disabled=false;$('#attachBtn').disabled=false;$('#input').focus()}};
+async function runChat(text,files,token){
+ if(token!==viewToken)return;
+ setStatus('Печатает…');showTyping();setSendLoading(true);
+ const fd=new FormData();fd.append('content',text);fd.append('provider_id',activeProvider);
+ files.forEach(f=>fd.append('files',f));
+ const cid=current,controller=new AbortController(),bubble=streamingBubble(token);
+ chatAbortController=controller;
+ try{
+  const result=await streamApi('/api/chats/'+cid+'/message?stream=1',
+   {method:'POST',body:fd,signal:controller.signal},
+   answer=>bubble.update(answer));
+  if(token!==viewToken)return;
+  bubble.finish(result.answer,result.files||[]);
+  $('#chatTitle').textContent=result.title;
+  await loadChats();await refreshWorkspace();setStatus('Готово');
+ }catch(error){removeTyping();throw error}
+ finally{
+  if(chatAbortController===controller)chatAbortController=null;
+  setSendLoading(false);
+ }
+}
+
+// Stream ordinary Work Mode steps too. The task panel is updated while tokens
+// arrive; file generation still runs only after the full result is available.
+async function requestWorkFinal(token){
+ const options={method:'POST',headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({provider_id:activeProvider})};
+ const url='/api/work/final/'+current;
+ if(strictFormatting)return api(url,options); // report conversion needs complete content
+ showTyping();
+ const bubble=streamingBubble(token);
+ try{
+  const result=await streamApi(url+'?stream=1',options,answer=>bubble.update(answer));
+  bubble.finish(result.answer,result.files||[]);
+  return result;
+ }catch(error){removeTyping();throw error}
+}
+
 async function runWork(text,files,token){if(token!==viewToken)return;workState={plan:[]};$('#workPanel').classList.remove('hidden');applyCollapse();clearEvents();setStatus('Загружаю материалы…');const fd=new FormData();fd.append('content',text);fd.append('provider_id',activeProvider);files.forEach(f=>fd.append('files',f));fd.append('strict_formatting',strictFormatting?'1':'0');fd.append('allow_invention',allowInvention?'1':'0');fd.append('max_tasks',String(maxTasks));fd.append('recommended_tasks',String(recommendedTasks));const intake=await api('/api/work/intake/'+current,{method:'POST',body:fd});if(token!==viewToken)return;workState={...intake,plan:Array.isArray(intake.plan)?intake.plan:[]};renderWorkPanel();startPolling(workState.run_id,token);await executeFrom(0,token)}
-async function executeFrom(start,token){if(token!==viewToken||!workState)return;workState.plan=Array.isArray(workState.plan)?workState.plan:[];const total=workState.plan.length;if(!total){setStatus('Строю план…');const plan=await api('/api/work/plan/'+current,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider_id:activeProvider})});workState.plan=Array.isArray(plan.tasks)?plan.tasks:[];renderWorkPanel()}for(let i=start;i<workState.plan.length;i++){if(token!==viewToken)return;workState.current=i;workState.plan[i].status='running';renderWorkPanel();setStatus(`Выполняю задачу ${i+1} из ${workState.plan.length}…`);const result=await api('/api/work/task/'+current,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider_id:activeProvider,index:i})});workState.plan[i].status='done';workState.plan[i].result=result.result;renderWorkPanel();await refreshWorkspace();if(token!==viewToken)return}setStatus('Готовлю итог…');const final=await api('/api/work/final/'+current,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider_id:activeProvider})});stopPolling();if(token!==viewToken)return;addLocal({role:'assistant',content:final.answer,files:final.files||[]});$('#chatTitle').textContent=final.title;await loadChats();await refreshWorkspace();setStatus('Готово');hideContinue();setTimeout(()=>$('#workPanel').classList.add('hidden'),350)}
+async function executeFrom(start,token){if(token!==viewToken||!workState)return;workState.plan=Array.isArray(workState.plan)?workState.plan:[];const total=workState.plan.length;if(!total){setStatus('Строю план…');const plan=await api('/api/work/plan/'+current,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider_id:activeProvider})});workState.plan=Array.isArray(plan.tasks)?plan.tasks:[];renderWorkPanel()}for(let i=start;i<workState.plan.length;i++){if(token!==viewToken)return;workState.current=i;workState.plan[i].status='running';renderWorkPanel();setStatus(`Выполняю задачу ${i+1} из ${workState.plan.length}…`);const result=await streamApi('/api/work/task/'+current+'?stream=1',
+ {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider_id:activeProvider,index:i})},
+ answer=>{if(token===viewToken){workState.plan[i].result=answer;renderWorkPanel()}});workState.plan[i].status='done';workState.plan[i].result=result.result;renderWorkPanel();await refreshWorkspace();if(token!==viewToken)return}setStatus('Готовлю итог…');const final=await requestWorkFinal(viewToken);stopPolling();if(token!==viewToken)return;if(strictFormatting)addLocal({role:'assistant',content:final.answer,files:final.files||[]});$('#chatTitle').textContent=final.title;await loadChats();await refreshWorkspace();setStatus('Готово');hideContinue();setTimeout(()=>$('#workPanel').classList.add('hidden'),350)}
 async function checkRecoverableRun(){try{const d=await api('/api/work/continue/'+current);if(d.tasks?.length&&d.next_index!==null)showContinueOption(d.next_index);else if(d.can_finalize)showContinueOption(null)}catch(e){}}
 async function showContinueOption(index=null){try{const d=await api('/api/work/continue/'+current);if(d.tasks?.length&&d.next_index!==null||d.can_finalize){$('#workPanel').classList.remove('hidden');applyCollapse();$('#workContinue').classList.remove('hidden');$('#workContinue').textContent=d.can_finalize?'Продолжить: итог':'Продолжить с задачи '+(d.next_index+1);workState=workState||{plan:d.tasks};workState.plan=d.tasks;renderWorkPanel()}}catch(e){}}
 function hideContinue(){$('#workContinue').classList.add('hidden')}
-$('#workContinue').onclick=async()=>{if(!current||!activeProvider)return;$('#workContinue').disabled=true;$('#send').disabled=true;$('#input').disabled=true;try{const d=await api('/api/work/continue/'+current,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider_id:activeProvider})});workState={plan:d.tasks||workState?.plan||[]};const state=await api('/api/work/continue/'+current);if(state.can_finalize){setStatus('Готовлю итог…');const final=await api('/api/work/final/'+current,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider_id:activeProvider})});addLocal({role:'assistant',content:final.answer,files:final.files||[]});$('#chatTitle').textContent=final.title;hideContinue();setStatus('Готово')}else{startPolling(state.run_id,viewToken);await executeFrom(state.next_index,viewToken)}await loadChats();await refreshWorkspace()}catch(e){addLocal({role:'assistant',content:'Не удалось продолжить: '+e.message});setStatus('Ошибка');await showContinueOption()}finally{$('#workContinue').disabled=false;$('#send').disabled=false;$('#input').disabled=false}}
+$('#workContinue').onclick=async()=>{if(!current||!activeProvider)return;$('#workContinue').disabled=true;$('#send').disabled=true;$('#input').disabled=true;try{const d=await api('/api/work/continue/'+current,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider_id:activeProvider})});workState={plan:d.tasks||workState?.plan||[]};const state=await api('/api/work/continue/'+current);if(state.can_finalize){setStatus('Готовлю итог…');const final=await requestWorkFinal(viewToken);if(strictFormatting)addLocal({role:'assistant',content:final.answer,files:final.files||[]});$('#chatTitle').textContent=final.title;hideContinue();setStatus('Готово')}else{startPolling(state.run_id,viewToken);await executeFrom(state.next_index,viewToken)}await loadChats();await refreshWorkspace()}catch(e){addLocal({role:'assistant',content:'Не удалось продолжить: '+e.message});setStatus('Ошибка');await showContinueOption()}finally{$('#workContinue').disabled=false;$('#send').disabled=false;$('#input').disabled=false}}
 
 function updateChatToggles(){$('#metaBtn').textContent='◉ Метаанализ: '+(metaAnalysis?'вкл':'выкл');$('#metaBtn').classList.toggle('active',metaAnalysis);$('#tempBtn').textContent='⌛ Временный: '+(temporaryChat?'вкл':'выкл');$('#tempBtn').classList.toggle('active',temporaryChat)}
 $('#metaBtn').onclick=async()=>{if(!current)return;metaAnalysis=!metaAnalysis;await api('/api/chats/'+current,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({meta_analysis:metaAnalysis})});updateChatToggles()};
