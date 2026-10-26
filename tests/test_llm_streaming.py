@@ -24,7 +24,7 @@ class FakeResponse:
         if self.status_code >= 400:
             raise RuntimeError("HTTP " + str(self.status_code))
 
-    def iter_lines(self):
+    def iter_lines(self, chunk_size=None):
         return iter(self.lines)
 
     def json(self):
