@@ -5,7 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from platform_utils import detached_flags, npm_executable
+from platform_utils import configure_console, detached_flags, npm_executable
 
 ROOT = Path(__file__).resolve().parent
 PYTHON = ROOT / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
@@ -29,6 +29,7 @@ def stop_tree(process):
 
 
 def main():
+    configure_console()
     if not PYTHON.is_file():
         print("Виртуальное окружение не найдено. Сначала выполните: python setup.py")
         return 1
