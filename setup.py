@@ -8,6 +8,8 @@ import sys
 import venv
 from pathlib import Path
 
+from platform_utils import configure_console
+
 ROOT = Path(__file__).resolve().parent
 VENV = ROOT / ".venv"
 
@@ -22,6 +24,7 @@ def protect(path):
 
 
 def main():
+    configure_console()
     parser = argparse.ArgumentParser(description="Установка inhCHAT на Windows/Linux/macOS")
     parser.add_argument("--skip-deepseek", action="store_true",
                         help="Не устанавливать дополнительный DeepSeek proxy (обычный чат продолжит работать)")
